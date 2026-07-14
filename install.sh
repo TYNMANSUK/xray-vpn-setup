@@ -28,16 +28,44 @@ set -euo pipefail
 MANAGEMENT_MODE=0
 SUBCOMMAND=""
 SCRIPT_BASENAME=$(basename "$0")
+FIRST_ARG="${1:-}"
 
 if [[ "$SCRIPT_BASENAME" == "xray-vpn" || "$SCRIPT_BASENAME" == "vpn" ]]; then
   MANAGEMENT_MODE=1
-  SUBCOMMAND="${1:-menu}"
-elif [[ "$1" == "--menu" || "$1" == "menu" ]]; then
+  SUBCOMMAND="${FIRST_ARG:-menu}"
+elif [[ "$FIRST_ARG" == "--menu" || "$FIRST_ARG" == "menu" ]]; then
   MANAGEMENT_MODE=1
   SUBCOMMAND="menu"
-elif [[ "$1" =~ ^(status|restart|speed|logs|info|diag)$ ]]; then
+elif [[ "$FIRST_ARG" =~ ^(status|restart|speed|logs|info|diag)$ ]]; then
   MANAGEMENT_MODE=1
-  SUBCOMMAND="$1"
+  SUBCOMMAND="$FIRST_ARG"
+fi
+
+# ==================== АВТО TMUX ====================
+# Если не в tmux — ставим tmux (если нужно) и перезапускаем скрипт внутри tmux 'vpn'
+# Это позволяет просто делать curl | bash или bash install.sh
+if [ -z "${TMUX:-}" ]; then
+  if ! command -v tmux >/dev/null 2>&1; then
+    echo "[INFO] tmux не установлен — ставим..."
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update -y >/dev/null 2>&1 || true
+    apt-get install -y tmux >/dev/null 2>&1 || true
+  fi
+  if command -v tmux >/dev/null 2>&1; then
+    echo ""
+    echo ">>> Запускаю в tmux сессии 'vpn' (чтобы SSH не отвалился)"
+    echo ">>> Если отвалится — зайди и набери: tmux attach -t vpn"
+    echo ""
+    sleep 1
+    # Для curl | bash $0 может быть /dev/fd/xx, поэтому скачиваем если нужно
+    if [[ "$SCRIPT_BASENAME" == "bash" || "$0" == /dev/fd/* || "$0" == "-" || ! -r "$0" ]]; then
+      curl -fsSL https://raw.githubusercontent.com/TYNMANSUK/xray-vpn-setup/main/install.sh -o /tmp/xray-vpn-install.sh
+      chmod +x /tmp/xray-vpn-install.sh
+      exec tmux new-session -s vpn "/tmp/xray-vpn-install.sh ${FIRST_ARG}"
+    else
+      exec tmux new-session -s vpn "bash $0 ${FIRST_ARG}"
+    fi
+  fi
 fi
 
 # ==================== ЦВЕТА ====================
@@ -141,25 +169,7 @@ detect_os() {
   log "ОС: $PRETTY_NAME"
 }
 
-# Автоматически ставим tmux и перезапускаемся внутри tmux-сессии 'vpn'
-# Теперь юзеру не нужно вручную делать apt install tmux + tmux new
-ensure_tmux_session() {
-  if ! command -v tmux >/dev/null 2>&1; then
-    echo "[INFO] tmux не найден — ставим минимально..."
-    export DEBIAN_FRONTEND=noninteractive
-    apt-get update -y >/dev/null 2>&1
-    apt-get install -y tmux >/dev/null 2>&1
-  fi
-
-  if [ -z "$TMUX" ]; then
-    echo ""
-    echo ">>> Перезапускаю себя внутри tmux-сессии 'vpn' (для защиты SSH)"
-    echo ">>> Если SSH отвалится — просто зайди на сервер и выполни: tmux attach -t vpn"
-    echo ""
-    sleep 1
-    exec tmux new-session -s vpn "bash $0 $@"
-  fi
-}
+# (tmux auto logic moved to early block above for curl | bash compatibility)
 
 # Дополнительная защита после suspend / просыпания VM
 if [ "$(cat /proc/uptime | awk '{print int($1)}')" -lt 300 ]; then
@@ -1123,9 +1133,6 @@ main() {
   check_root
   detect_os
   system_info
-
-  # Самое важное: убеждаемся, что мы внутри tmux (и tmux установлен)
-  ensure_tmux_session
 
   # Защита SSH от отвала во время тяжёлой установки
   echo "Настраиваем SSH keepalive для стабильности соединения..."
