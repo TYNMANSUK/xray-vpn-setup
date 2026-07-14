@@ -16,12 +16,29 @@
 #   - Реально проверяет связки
 #
 # Запуск:
-#   curl -fsSL https://raw.githubusercontent.com/.../install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/TYNMANSUK/xray-vpn-setup/main/install.sh | bash
 # или
 #   bash install.sh
 #
 
 set -euo pipefail
+
+# ==================== РЕЖИМ УПРАВЛЕНИЯ ====================
+# Поддержка: vpn, xray-vpn, vpn status, vpn restart, vpn speed, vpn logs и т.д.
+MANAGEMENT_MODE=0
+SUBCOMMAND=""
+SCRIPT_BASENAME=$(basename "$0")
+
+if [[ "$SCRIPT_BASENAME" == "xray-vpn" || "$SCRIPT_BASENAME" == "vpn" ]]; then
+  MANAGEMENT_MODE=1
+  SUBCOMMAND="${1:-menu}"
+elif [[ "$1" == "--menu" || "$1" == "menu" ]]; then
+  MANAGEMENT_MODE=1
+  SUBCOMMAND="menu"
+elif [[ "$1" =~ ^(status|restart|speed|logs|info|diag)$ ]]; then
+  MANAGEMENT_MODE=1
+  SUBCOMMAND="$1"
+fi
 
 # ==================== ЦВЕТА ====================
 RED='\033[0;31m'
@@ -47,6 +64,50 @@ log()    { echo -e "${BLUE}[INFO]${NC} $1" | tee -a "$INSTALL_LOG"; }
 success(){ echo -e "${GREEN}[УСПЕХ]${NC} $1" | tee -a "$INSTALL_LOG"; }
 warn()   { echo -e "${YELLOW}[ВНИМАНИЕ]${NC} $1" | tee -a "$INSTALL_LOG"; }
 error()  { echo -e "${RED}[ОШИБКА]${NC} $1" | tee -a "$INSTALL_LOG"; }
+
+# Улучшенный спиннер: [работаем] + спиннер + последние 2 строки лога в реальном времени
+spinner() {
+  local pid=$1
+  local log_file=${2:-$INSTALL_LOG}
+  local delay=0.15
+  local spin='⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'
+  local i=0
+
+  while kill -0 "$pid" 2>/dev/null; do
+    local char="${spin:$i:1}"
+    i=$(( (i + 1) % ${#spin} ))
+
+    # Последние строки лога (максимум 2, обрезаем)
+    local status_line=""
+    if [[ -f "$log_file" ]]; then
+      status_line=$(tail -n 2 "$log_file" 2>/dev/null | sed 's/^ *//;s/ *$//' | tail -c 80 | tr '\n' ' ')
+    fi
+
+    # Выводим красивую строку
+    printf "\r${CYAN}[работаем]${NC} %s  ${YELLOW}%s${NC}" "$char" "$status_line"
+    sleep $delay
+  done
+
+  printf "\r\033[K"   # полностью очищаем текущую строку
+}
+
+# Запуск команды с спиннером + лог
+run_long() {
+  local desc="$1"
+  shift
+  log "$desc"
+  "$@" >> "$INSTALL_LOG" 2>&1 &
+  local pid=$!
+  spinner "$pid"
+  wait "$pid"
+  local status=$?
+  if [ $status -eq 0 ]; then
+    success "$desc — готово"
+  else
+    error "$desc — ошибка (смотри $INSTALL_LOG)"
+    return $status
+  fi
+}
 
 print_header() {
   clear
@@ -90,17 +151,34 @@ system_info() {
 
 # ==================== 1. ОБНОВЛЕНИЕ СИСТЕМЫ ====================
 update_system() {
-  log "Обновление системы и установка базовых пакетов..."
+  echo
+  log "Шаг 1/7: Обновление системы и установка базовых пакетов..."
+  echo -e "   ${YELLOW}Это может занять 1–4 минуты. Смотри, что происходит ниже.${NC}"
   export DEBIAN_FRONTEND=noninteractive
-  apt-get update -y >> "$INSTALL_LOG" 2>&1
-  apt-get upgrade -y >> "$INSTALL_LOG" 2>&1
-  apt-get install -y curl wget jq unzip ca-certificates ufw fail2ban sqlite3 net-tools >> "$INSTALL_LOG" 2>&1
-  success "Система обновлена"
+
+  # apt update
+  {
+    echo "[apt] Запуск apt update..."
+    apt-get update -y 2>&1
+  } >> "$INSTALL_LOG" &
+  spinner $! "$INSTALL_LOG"
+  wait $! || true
+
+  # apt upgrade + install
+  {
+    echo "[apt] Обновление пакетов и установка необходимых утилит..."
+    apt-get upgrade -y 2>&1
+    apt-get install -y curl wget jq unzip ca-certificates ufw fail2ban sqlite3 net-tools 2>&1
+  } >> "$INSTALL_LOG" &
+  spinner $! "$INSTALL_LOG"
+  wait $! || true
+
+  success "Система обновлена и базовые пакеты установлены"
 }
 
 # ==================== 2. УМНЫЙ SWAP ====================
 setup_swap() {
-  log "Настройка swap (умный подбор)..."
+  log "Шаг 2/7: Настройка swap (умный подбор)..."
 
   local mem_mb=$(free -m | awk '/Mem:/ {print $2}')
   local swap_size=1024
@@ -150,7 +228,7 @@ setup_swap() {
 
 # ==================== 3. ЛУЧШИЕ ОПТИМИЗАЦИИ (BBR + сеть) ====================
 apply_tuning() {
-  log "Применяем лучшие сетевые оптимизации (BBR, буферы, Reality-friendly)..."
+  log "Шаг 3/7: Применяем лучшие сетевые оптимизации (BBR + буферы)..."
 
   cat > /etc/sysctl.d/99-xray-vpn.conf << 'EOF'
 # xray-vpn — лучшие настройки для Xray / Reality
@@ -204,7 +282,7 @@ EOF
 
 # ==================== 4. FIREWALL ====================
 setup_firewall() {
-  log "Настройка ufw (firewall)..."
+  log "Шаг 4/7: Настройка firewall (ufw)..."
 
   ufw --force reset >> "$INSTALL_LOG" 2>&1 || true
   ufw default deny incoming >> "$INSTALL_LOG" 2>&1
@@ -221,7 +299,7 @@ setup_firewall() {
 
 # ==================== 5. FAIL2BAN ====================
 setup_fail2ban() {
-  log "Установка и настройка fail2ban..."
+  log "Шаг 5/7: Установка и настройка fail2ban..."
 
   systemctl enable --now fail2ban >> "$INSTALL_LOG" 2>&1 || true
 
@@ -253,27 +331,39 @@ EOF
 
 # ==================== 6. УСТАНОВКА 3X-UI + XRAY ====================
 install_3x_ui() {
-  log "Установка 3x-ui (Xray + панель)..."
+  log "Шаг 6/7: Установка 3x-ui (Xray + панель)..."
+  echo -e "   ${YELLOW}Скачиваем и запускаем официальный установщик. Будет видно прогресс.${NC}"
 
   rm -f "$XUI_INSTALL_LOG"
 
-  curl -Ls https://raw.githubusercontent.com/MHSanaei/3x-ui/master/install.sh -o /tmp/3xui_installer.sh 2>>"$INSTALL_LOG"
+  # Скачивание установщика с настоящим прогресс-баром
+  echo "  Скачивание установщика 3x-ui..."
+  curl -L --progress-bar \
+       -o /tmp/3xui_installer.sh \
+       https://raw.githubusercontent.com/MHSanaei/3x-ui/master/install.sh 2>&1 | tee -a "$INSTALL_LOG"
 
   if [[ ! -s /tmp/3xui_installer.sh ]]; then
     error "Не удалось скачать установщик 3x-ui"
     exit 1
   fi
 
-  log "Запуск установщика 3x-ui (неинтерактивно)..."
+  log "  Запуск установщика 3x-ui (неинтерактивно)..."
   export DEBIAN_FRONTEND=noninteractive
 
-  # Запускаем с yes n чтобы отвечать "нет" на вопросы
-  yes n | bash /tmp/3xui_installer.sh 2>&1 | tee "$XUI_INSTALL_LOG" || true
+  # Запуск с прогрессом в лог + спиннер + последние строки
+  {
+    yes n | bash /tmp/3xui_installer.sh 2>&1
+  } | tee "$XUI_INSTALL_LOG" &
+  local installer_pid=$!
 
-  sleep 3
+  # Красивый спиннер с последними строками из лога 3x-ui
+  spinner "$installer_pid" "$XUI_INSTALL_LOG"
+  wait "$installer_pid" || true
+
+  sleep 2
 
   if [[ -x /usr/local/x-ui/x-ui ]]; then
-    success "3x-ui установлен"
+    success "3x-ui + Xray установлены"
   else
     error "3x-ui не установился. Посмотри лог: $XUI_INSTALL_LOG"
     exit 1
@@ -298,6 +388,113 @@ install_3x_ui() {
   systemctl restart x-ui 2>/dev/null || true
 
   success "Xray + 3x-ui готовы"
+}
+
+# ==================== УСТАНОВКА КОМАНДЫ ДЛЯ МЕНЮ ====================
+install_management_command() {
+  log "Шаг 7/7: Устанавливаем удобную команду управления (vpn / xray-vpn)..."
+
+  local install_dir="/opt/xray-vpn"
+  local script_dest="$install_dir/install.sh"
+  local cmd_path="/usr/local/bin/xray-vpn"
+  local alt_cmd="/usr/local/bin/vpn"
+
+  mkdir -p "$install_dir"
+
+  # Копируем текущий скрипт в постоянное место (работает даже при curl | bash)
+  if [[ -f "$0" && "$0" != "/dev/fd/"* && "$0" != "-" ]]; then
+    cp "$0" "$script_dest" 2>/dev/null || true
+  fi
+
+  # Если не скопировался (curl | bash), скачиваем свежую версию
+  if [[ ! -f "$script_dest" ]]; then
+    curl -fsSL https://raw.githubusercontent.com/TYNMANSUK/xray-vpn-setup/main/install.sh -o "$script_dest" 2>/dev/null || true
+  fi
+
+  chmod +x "$script_dest" 2>/dev/null || true
+
+  # Создаём удобную команду
+  cat > "$cmd_path" << EOF
+#!/bin/bash
+# xray-vpn / vpn — управление Xray VPN
+if [[ -f "$script_dest" ]]; then
+  bash "$script_dest" "\$@"
+else
+  echo "Скрипт не найден. Переустановите: curl -fsSL https://raw.githubusercontent.com/TYNMANSUK/xray-vpn-setup/main/install.sh | bash"
+  exit 1
+fi
+EOF
+
+  chmod +x "$cmd_path"
+  ln -sf "$cmd_path" "$alt_cmd" 2>/dev/null || true
+
+  success "Команда установлена. Теперь можно использовать: vpn  или  xray-vpn"
+}
+
+# ==================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ УПРАВЛЕНИЯ ====================
+
+show_quick_status() {
+  echo "=== Статус Xray VPN ==="
+  echo
+  echo -n "x-ui:     "; systemctl is-active x-ui
+  echo -n "xray:     "; systemctl is-active xray 2>/dev/null || echo "inactive (не найден отдельный сервис)"
+  echo -n "fail2ban: "; systemctl is-active fail2ban
+  echo
+  echo "Порт панели: ${PANEL_PORT}"
+  echo "Информация:  $INFO_FILE"
+  echo
+  echo "BBR активен: $(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null)"
+  echo "Swap:        $(free -h | awk '/Swap:/ {print $2 " total, " $3 " used"}')"
+}
+
+restart_services() {
+  log "Перезапускаем сервисы..."
+  systemctl restart x-ui
+  systemctl restart xray 2>/dev/null || true
+  systemctl restart fail2ban 2>/dev/null || true
+  success "Сервисы перезапущены"
+  show_quick_status
+}
+
+show_logs() {
+  echo "=== Последние логи ==="
+  echo
+  echo "--- x-ui ---"
+  journalctl -u x-ui -n 30 --no-pager 2>/dev/null || tail -30 /var/log/xray-vpn-install.log
+  echo
+  echo "--- Системные (xray) ---"
+  journalctl -u xray -n 20 --no-pager 2>/dev/null || true
+}
+
+speed_test() {
+  echo
+  log "=== Проверка скорости и пинга ==="
+  echo
+
+  if ! command -v curl >/dev/null 2>&1; then
+    error "curl не найден"
+    return 1
+  fi
+
+  echo "→ Загрузка 100MB (Cloudflare):"
+  curl -L -o /dev/null -# --max-time 35 \
+    -w "   Скорость: %{speed_download} байт/сек (~%.1f MB/s)\n   Время: %{time_total}s\n" \
+    https://speed.cloudflare.com/__down?bytes=100000000 2>/dev/null || echo "   Тест не удался"
+
+  echo
+  echo "→ Пинг (задержка):"
+  printf "   %-20s %s\n" "Хост" "Средний пинг"
+  for host in 1.1.1.1 google.com ya.ru cloudflare.com; do
+    avg=$(ping -c 4 -W 2 "$host" 2>/dev/null | tail -1 | awk -F'/' '{print $5}')
+    if [[ -n "$avg" ]]; then
+      printf "   %-20s %s ms\n" "$host" "$avg"
+    else
+      printf "   %-20s недоступен\n" "$host"
+    fi
+  done
+
+  echo
+  log "Тест скорости завершён"
 }
 
 # ==================== ПОЛУЧЕНИЕ ДАННЫХ ПАНЕЛИ ====================
@@ -810,20 +1007,28 @@ auto_setup() {
 # ==================== МЕНЮ ПОСЛЕ УСТАНОВКИ ====================
 post_install_menu() {
   get_panel_settings
-  save_info_file
 
-  echo
-  success "Установка завершена!"
-  echo
-  echo -e "${YELLOW}Что хочешь сделать дальше?${NC}"
+  # Если это не первый запуск меню — не перезаписываем info файл агрессивно
+  if [[ $MANAGEMENT_MODE -eq 0 ]]; then
+    save_info_file
+    echo
+    success "Установка завершена!"
+    echo
+  fi
+
+  echo -e "${YELLOW}Меню управления Xray VPN${NC}"
   echo
 
   while true; do
-    echo "1) Автоматическая настройка (рекомендуется) — разные связки + проверка"
-    echo "2) Показать данные для входа в панель"
-    echo "3) Выйти"
+    echo "1) Автоматическая настройка / добавить новые связки (с проверкой)"
+    echo "2) Показать данные панели и ссылки"
+    echo "3) Показать статус"
+    echo "4) Перезапустить сервисы"
+    echo "5) Посмотреть логи"
+    echo "6) Проверить скорость и пинг"
+    echo "7) Выйти"
     echo
-    read -p "Выбери вариант [1-3]: " choice
+    read -p "Выбери вариант [1-7]: " choice
 
     case "$choice" in
       1)
@@ -833,9 +1038,20 @@ post_install_menu() {
         show_panel_info
         ;;
       3)
+        show_quick_status
+        ;;
+      4)
+        restart_services
+        ;;
+      5)
+        show_logs
+        ;;
+      6)
+        speed_test
+        ;;
+      7)
         echo
-        success "Готово! Информация сохранена в $INFO_FILE"
-        echo "Можешь теперь зайти в панель и добавить клиентов."
+        success "Выход"
         exit 0
         ;;
       *)
@@ -848,6 +1064,37 @@ post_install_menu() {
 
 # ==================== ГЛАВНАЯ ЛОГИКА ====================
 main() {
+  if [[ $MANAGEMENT_MODE -eq 1 ]]; then
+    get_panel_settings
+
+    case "$SUBCOMMAND" in
+      status)
+        show_quick_status
+        exit 0
+        ;;
+      restart)
+        restart_services
+        exit 0
+        ;;
+      speed)
+        speed_test
+        exit 0
+        ;;
+      logs)
+        show_logs
+        exit 0
+        ;;
+      info)
+        show_panel_info
+        exit 0
+        ;;
+      menu|*)
+        post_install_menu
+        exit 0
+        ;;
+    esac
+  fi
+
   print_header
   check_root
   detect_os
@@ -856,6 +1103,9 @@ main() {
   : > "$INSTALL_LOG"
 
   log "Начинаем полную установку и настройку..."
+  echo "   Будет выполнено 7 шагов."
+  echo "   Во время долгих команд (apt, скачивание) будет крутиться индикатор — так видно, что всё работает."
+  echo
 
   update_system
   setup_swap
@@ -867,6 +1117,10 @@ main() {
   # Пытаемся сделать пароль удобным для автонастройки
   reset_panel_password
 
+  # Устанавливаем команду для будущего вызова меню
+  install_management_command
+
+  success "Все основные шаги выполнены"
   post_install_menu
 }
 
