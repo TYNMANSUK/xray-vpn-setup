@@ -23,6 +23,12 @@
 
 set -euo pipefail
 
+# When run via `curl | bash` there are no arguments.
+# This prevents "unbound variable" error from set -u.
+if [ $# -eq 0 ]; then
+  set -- ""
+fi
+
 # ==================== РЕЖИМ УПРАВЛЕНИЯ ====================
 # Поддержка: vpn, xray-vpn, vpn status, vpn restart, vpn speed, vpn logs и т.д.
 MANAGEMENT_MODE=0
