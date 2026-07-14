@@ -141,6 +141,44 @@ detect_os() {
   log "ОС: $PRETTY_NAME"
 }
 
+# Автоматически ставим tmux и перезапускаемся внутри tmux-сессии 'vpn'
+# Теперь юзеру не нужно вручную делать apt install tmux + tmux new
+ensure_tmux_session() {
+  if ! command -v tmux >/dev/null 2>&1; then
+    echo "[INFO] tmux не найден — ставим минимально..."
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update -y >/dev/null 2>&1
+    apt-get install -y tmux >/dev/null 2>&1
+  fi
+
+  if [ -z "$TMUX" ]; then
+    echo ""
+    echo ">>> Перезапускаю себя внутри tmux-сессии 'vpn' (для защиты SSH)"
+    echo ">>> Если SSH отвалится — просто зайди на сервер и выполни: tmux attach -t vpn"
+    echo ""
+    sleep 1
+    exec tmux new-session -s vpn "bash $0 $@"
+  fi
+}
+
+# Дополнительная защита после suspend / просыпания VM
+if [ "$(cat /proc/uptime | awk '{print int($1)}')" -lt 300 ]; then
+  echo "[INFO] VM недавно проснулась (возможно после suspend) — даём 25 сек на прогрев системы..."
+  sleep 25
+fi
+
+# Если swap ещё не создан — создаём его **самым первым** (критично для 2GB VPS)
+if ! swapon --show | grep -q '/swapfile'; then
+  echo "[INFO] Swap не найден — создаём 2G немедленно (чтобы не упала система)..."
+  fallocate -l 2G /swapfile 2>/dev/null || dd if=/dev/zero of=/swapfile bs=1M count=2048 status=none
+  chmod 600 /swapfile
+  mkswap /swapfile >/dev/null 2>&1
+  swapon /swapfile
+  grep -q '/swapfile' /etc/fstab || echo '/swapfile none swap sw 0 0' >> /etc/fstab
+  sysctl -w vm.swappiness=10 >/dev/null 2>&1
+  echo "[OK] Swap 2G создан и включён"
+fi
+
 system_info() {
   local mem=$(free -m | awk '/Mem:/ {print $2}')
   local cpu=$(nproc)
@@ -152,33 +190,24 @@ system_info() {
 # ==================== 1. ОБНОВЛЕНИЕ СИСТЕМЫ ====================
 update_system() {
   echo
-  log "Шаг 1/7: Обновление системы и установка базовых пакетов..."
-  echo -e "   ${YELLOW}Это может занять 1–4 минуты. Смотри, что происходит ниже.${NC}"
+  log "Шаг 1/6: Обновление системы и установка базовых пакетов..."
+  echo -e "   ${YELLOW}Это может занять 1–4 минуты. Сейчас будет показан реальный вывод apt (это нормально и информативно).${NC}"
   export DEBIAN_FRONTEND=noninteractive
 
-  # apt update
-  {
-    echo "[apt] Запуск apt update..."
-    apt-get update -y 2>&1
-  } >> "$INSTALL_LOG" &
-  spinner $! "$INSTALL_LOG"
-  wait $! || true
+  # Показываем живой вывод apt, одновременно пишем в лог
+  echo ">>> Выполняется apt update..."
+  apt-get update -y 2>&1 | tee -a "$INSTALL_LOG"
 
-  # apt upgrade + install
-  {
-    echo "[apt] Обновление пакетов и установка необходимых утилит..."
-    apt-get upgrade -y 2>&1
-    apt-get install -y curl wget jq unzip ca-certificates ufw fail2ban sqlite3 net-tools 2>&1
-  } >> "$INSTALL_LOG" &
-  spinner $! "$INSTALL_LOG"
-  wait $! || true
+  echo ">>> Выполняется apt upgrade + установка необходимых пакетов..."
+  apt-get upgrade -y 2>&1 | tee -a "$INSTALL_LOG"
+  apt-get install -y curl wget jq unzip ca-certificates ufw fail2ban sqlite3 net-tools 2>&1 | tee -a "$INSTALL_LOG"
 
   success "Система обновлена и базовые пакеты установлены"
 }
 
 # ==================== 2. УМНЫЙ SWAP ====================
 setup_swap() {
-  log "Шаг 2/7: Настройка swap (умный подбор)..."
+  log "Ранняя настройка swap (для стабильности SSH на слабых VPS)..."
 
   local mem_mb=$(free -m | awk '/Mem:/ {print $2}')
   local swap_size=1024
@@ -228,7 +257,7 @@ setup_swap() {
 
 # ==================== 3. ЛУЧШИЕ ОПТИМИЗАЦИИ (BBR + сеть) ====================
 apply_tuning() {
-  log "Шаг 3/7: Применяем лучшие сетевые оптимизации (BBR + буферы)..."
+  log "Шаг 2/6: Применяем лучшие сетевые оптимизации (BBR + буферы)..."
 
   cat > /etc/sysctl.d/99-xray-vpn.conf << 'EOF'
 # xray-vpn — лучшие настройки для Xray / Reality
@@ -282,7 +311,7 @@ EOF
 
 # ==================== 4. FIREWALL ====================
 setup_firewall() {
-  log "Шаг 4/7: Настройка firewall (ufw)..."
+  log "Шаг 3/6: Настройка firewall (ufw)..."
 
   ufw --force reset >> "$INSTALL_LOG" 2>&1 || true
   ufw default deny incoming >> "$INSTALL_LOG" 2>&1
@@ -299,7 +328,7 @@ setup_firewall() {
 
 # ==================== 5. FAIL2BAN ====================
 setup_fail2ban() {
-  log "Шаг 5/7: Установка и настройка fail2ban..."
+  log "Шаг 4/6: Установка и настройка fail2ban..."
 
   systemctl enable --now fail2ban >> "$INSTALL_LOG" 2>&1 || true
 
@@ -331,7 +360,7 @@ EOF
 
 # ==================== 6. УСТАНОВКА 3X-UI + XRAY ====================
 install_3x_ui() {
-  log "Шаг 6/7: Установка 3x-ui (Xray + панель)..."
+  log "Шаг 5/6: Установка 3x-ui (Xray + панель)..."
   echo -e "   ${YELLOW}Скачиваем и запускаем официальный установщик. Будет видно прогресс.${NC}"
 
   rm -f "$XUI_INSTALL_LOG"
@@ -348,17 +377,12 @@ install_3x_ui() {
   fi
 
   log "  Запуск установщика 3x-ui (неинтерактивно)..."
+  echo -e "   ${YELLOW}Сейчас пойдёт вывод от официального установщика 3x-ui.${NC}"
+  echo -e "   ${YELLOW}Ты увидишь сообщения про скачивание Xray, создание сервиса и т.д. — это нормально.${NC}"
   export DEBIAN_FRONTEND=noninteractive
 
-  # Запуск с прогрессом в лог + спиннер + последние строки
-  {
-    yes n | bash /tmp/3xui_installer.sh 2>&1
-  } | tee "$XUI_INSTALL_LOG" &
-  local installer_pid=$!
-
-  # Красивый спиннер с последними строками из лога 3x-ui
-  spinner "$installer_pid" "$XUI_INSTALL_LOG"
-  wait "$installer_pid" || true
+  # Показываем вывод установщика в реальном времени + в лог
+  yes n | bash /tmp/3xui_installer.sh 2>&1 | tee -a "$XUI_INSTALL_LOG"
 
   sleep 2
 
@@ -392,7 +416,7 @@ install_3x_ui() {
 
 # ==================== УСТАНОВКА КОМАНДЫ ДЛЯ МЕНЮ ====================
 install_management_command() {
-  log "Шаг 7/7: Устанавливаем удобную команду управления (vpn / xray-vpn)..."
+  log "Шаг 6/6: Устанавливаем удобную команду управления (vpn / xray-vpn)..."
 
   local install_dir="/opt/xray-vpn"
   local script_dest="$install_dir/install.sh"
@@ -1100,15 +1124,25 @@ main() {
   detect_os
   system_info
 
+  # Самое важное: убеждаемся, что мы внутри tmux (и tmux установлен)
+  ensure_tmux_session
+
+  # Защита SSH от отвала во время тяжёлой установки
+  echo "Настраиваем SSH keepalive для стабильности соединения..."
+  sed -i 's/^#*ClientAliveInterval.*/ClientAliveInterval 60/' /etc/ssh/sshd_config 2>/dev/null || true
+  sed -i 's/^#*ClientAliveCountMax.*/ClientAliveCountMax 3/' /etc/ssh/sshd_config 2>/dev/null || true
+  systemctl restart ssh 2>/dev/null || systemctl restart sshd 2>/dev/null || true
+
   : > "$INSTALL_LOG"
 
+  # ВАЖНО: создаём swap как можно раньше, чтобы не отваливался SSH на слабых VPS
+  setup_swap
+
   log "Начинаем полную установку и настройку..."
-  echo "   Будет выполнено 7 шагов."
-  echo "   Во время долгих команд (apt, скачивание) будет крутиться индикатор — так видно, что всё работает."
+  echo "   (Ты сейчас внутри tmux 'vpn' — если SSH отвалится: просто зайди и набери 'tmux attach -t vpn')"
   echo
 
   update_system
-  setup_swap
   apply_tuning
   setup_firewall
   setup_fail2ban
