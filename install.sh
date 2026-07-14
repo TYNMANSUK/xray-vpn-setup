@@ -29,6 +29,13 @@ if [ $# -eq 0 ]; then
   set -- ""
 fi
 
+# ==================== РАННЕЕ ОПРЕДЕЛЕНИЕ РЕЖИМА ЗАПУСКА ====================
+# Нужно, чтобы не пытаться запускать tmux при `curl | bash` (нет терминала)
+RUN_VIA_PIPE=false
+if [[ "$0" == "bash" || "$0" == /dev/fd/* || "$0" == "-" || ! -t 0 || ! -t 1 ]]; then
+  RUN_VIA_PIPE=true
+fi
+
 FIRST_ARG="${1:-}"
 
 # ==================== РЕЖИМ УПРАВЛЕНИЯ ====================
@@ -48,12 +55,14 @@ elif [ $# -gt 0 ] && [[ "$1" =~ ^(status|restart|speed|logs|info|diag)$ ]]; then
   SUBCOMMAND="$1"
 fi
 
-# ==================== АВТО TMUX ====================
-# Если не в tmux — ставим tmux (если нужно) и перезапускаем скрипт внутри tmux 'vpn'
-# Это позволяет просто делать curl | bash или bash install.sh
-# Важно: tmux new-session требует реальный терминал. При curl | bash (пайп) tty нет,
-# поэтому в не-интерактивном случае просто продолжаем, но tmux уже установлен.
+# ==================== АВТО TMUX (защита от обрыва SSH) ====================
+# Правило:
+# - Если у нас есть настоящий терминал (не пайп) и мы не в tmux — перезапускаемся в tmux 'vpn'.
+# - Если запущено через `curl | bash` (нет tty) — НЕ пытаемся запускать tmux (иначе ошибка "not a terminal").
+#   Просто ставим tmux и продолжаем. Пользователь может потом сам использовать tmux.
+
 if [ -z "${TMUX:-}" ]; then
+  # Всегда стараемся иметь tmux (полезно для ручного использования)
   if ! command -v tmux >/dev/null 2>&1; then
     echo "[INFO] tmux не установлен — ставим..."
     export DEBIAN_FRONTEND=noninteractive
@@ -61,28 +70,38 @@ if [ -z "${TMUX:-}" ]; then
     apt-get install -y tmux >/dev/null 2>&1 || true
   fi
 
-  # Только если у нас реальный терминал (не пайп от curl), пытаемся уйти в tmux
-  if command -v tmux >/dev/null 2>&1 && [ -t 0 ] && [ -t 1 ]; then
+  # Пытаемся уйти в tmux ТОЛЬКО если:
+  # - есть tmux
+  # - есть реальный терминал
+  # - мы не в piped-режиме (curl | bash)
+  if command -v tmux >/dev/null 2>&1 && [ -t 0 ] && [ -t 1 ] && [ "$RUN_VIA_PIPE" = false ]; then
     echo ""
-    echo ">>> Запускаю в tmux сессии 'vpn' (чтобы SSH не отвалился)"
-    echo ">>> Если отвалится — зайди и набери: tmux attach -t vpn"
+    echo ">>> Запускаю в tmux сессии 'vpn' (чтобы SSH не отвалился во время apt/установки)"
+    echo ">>> Если отвалится — зайди на сервер и набери: tmux attach -t vpn"
     echo ""
     sleep 1
+
+    # Безопасный запуск: если скрипт пришёл по пайпу — скачиваем его во временный файл
     if [[ "$SCRIPT_BASENAME" == "bash" || "$0" == /dev/fd/* || "$0" == "-" || ! -r "$0" ]]; then
+      echo "[INFO] Скачиваю скрипт во временный файл для tmux..."
       curl -fsSL https://raw.githubusercontent.com/TYNMANSUK/xray-vpn-setup/main/install.sh -o /tmp/xray-vpn-install.sh
       chmod +x /tmp/xray-vpn-install.sh
-      exec tmux new-session -s vpn "/tmp/xray-vpn-install.sh ${FIRST_ARG}"
+      exec tmux new-session -s vpn "/tmp/xray-vpn-install.sh ${FIRST_ARG:-}"
     else
-      exec tmux new-session -s vpn "bash $0 ${FIRST_ARG}"
+      exec tmux new-session -s vpn "bash $0 ${FIRST_ARG:-}"
     fi
   else
-    # non-tty (curl | bash) или уже в tmux — просто продолжаем
+    # non-tty / piped режим — не пытаемся запускать tmux
     if [ -z "${TMUX:-}" ]; then
       echo "[INFO] tmux установлен."
-      echo "[INFO] Запуск в не-интерактивном режиме (curl | bash без tty)."
-      echo "[INFO] Чтобы защитить установку от обрывов SSH, в следующий раз делай:"
-      echo "       tmux new -s vpn"
-      echo "       curl ... | bash   (или bash install.sh внутри tmux)"
+      if [ "$RUN_VIA_PIPE" = true ]; then
+        echo "[INFO] Обнаружен запуск через pipe (curl | bash) — авто-tmux пропущен."
+        echo "[INFO] Чтобы установка была защищена от обрывов SSH, используй:"
+        echo "    tmux new -s vpn"
+        echo "    curl -fsSL https://raw.githubusercontent.com/TYNMANSUK/xray-vpn-setup/main/install.sh | bash"
+      else
+        echo "[INFO] tmux не будет использован автоматически."
+      fi
     fi
   fi
 fi
