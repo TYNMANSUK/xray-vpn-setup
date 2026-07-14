@@ -29,22 +29,23 @@ if [ $# -eq 0 ]; then
   set -- ""
 fi
 
+FIRST_ARG="${1:-}"
+
 # ==================== РЕЖИМ УПРАВЛЕНИЯ ====================
 # Поддержка: vpn, xray-vpn, vpn status, vpn restart, vpn speed, vpn logs и т.д.
 MANAGEMENT_MODE=0
 SUBCOMMAND=""
 SCRIPT_BASENAME=$(basename "$0")
-FIRST_ARG="${1:-}"
 
 if [[ "$SCRIPT_BASENAME" == "xray-vpn" || "$SCRIPT_BASENAME" == "vpn" ]]; then
   MANAGEMENT_MODE=1
-  SUBCOMMAND="${FIRST_ARG:-menu}"
-elif [[ "$FIRST_ARG" == "--menu" || "$FIRST_ARG" == "menu" ]]; then
+  SUBCOMMAND="${1:-menu}"
+elif [ $# -gt 0 ] && [[ "$1" == "--menu" || "$1" == "menu" ]]; then
   MANAGEMENT_MODE=1
   SUBCOMMAND="menu"
-elif [[ "$FIRST_ARG" =~ ^(status|restart|speed|logs|info|diag)$ ]]; then
+elif [ $# -gt 0 ] && [[ "$1" =~ ^(status|restart|speed|logs|info|diag)$ ]]; then
   MANAGEMENT_MODE=1
-  SUBCOMMAND="$FIRST_ARG"
+  SUBCOMMAND="$1"
 fi
 
 # ==================== АВТО TMUX ====================
