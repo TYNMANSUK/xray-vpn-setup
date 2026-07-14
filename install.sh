@@ -51,6 +51,8 @@ fi
 # ==================== АВТО TMUX ====================
 # Если не в tmux — ставим tmux (если нужно) и перезапускаем скрипт внутри tmux 'vpn'
 # Это позволяет просто делать curl | bash или bash install.sh
+# Важно: tmux new-session требует реальный терминал. При curl | bash (пайп) tty нет,
+# поэтому в не-интерактивном случае просто продолжаем, но tmux уже установлен.
 if [ -z "${TMUX:-}" ]; then
   if ! command -v tmux >/dev/null 2>&1; then
     echo "[INFO] tmux не установлен — ставим..."
@@ -58,19 +60,29 @@ if [ -z "${TMUX:-}" ]; then
     apt-get update -y >/dev/null 2>&1 || true
     apt-get install -y tmux >/dev/null 2>&1 || true
   fi
-  if command -v tmux >/dev/null 2>&1; then
+
+  # Только если у нас реальный терминал (не пайп от curl), пытаемся уйти в tmux
+  if command -v tmux >/dev/null 2>&1 && [ -t 0 ] && [ -t 1 ]; then
     echo ""
     echo ">>> Запускаю в tmux сессии 'vpn' (чтобы SSH не отвалился)"
     echo ">>> Если отвалится — зайди и набери: tmux attach -t vpn"
     echo ""
     sleep 1
-    # Для curl | bash $0 может быть /dev/fd/xx, поэтому скачиваем если нужно
     if [[ "$SCRIPT_BASENAME" == "bash" || "$0" == /dev/fd/* || "$0" == "-" || ! -r "$0" ]]; then
       curl -fsSL https://raw.githubusercontent.com/TYNMANSUK/xray-vpn-setup/main/install.sh -o /tmp/xray-vpn-install.sh
       chmod +x /tmp/xray-vpn-install.sh
       exec tmux new-session -s vpn "/tmp/xray-vpn-install.sh ${FIRST_ARG}"
     else
       exec tmux new-session -s vpn "bash $0 ${FIRST_ARG}"
+    fi
+  else
+    # non-tty (curl | bash) или уже в tmux — просто продолжаем
+    if [ -z "${TMUX:-}" ]; then
+      echo "[INFO] tmux установлен."
+      echo "[INFO] Запуск в не-интерактивном режиме (curl | bash без tty)."
+      echo "[INFO] Чтобы защитить установку от обрывов SSH, в следующий раз делай:"
+      echo "       tmux new -s vpn"
+      echo "       curl ... | bash   (или bash install.sh внутри tmux)"
     fi
   fi
 fi
