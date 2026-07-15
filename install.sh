@@ -45,17 +45,17 @@ if [ -z "${TMUX:-}" ]; then
   if tmux has-session -t vpn 2>/dev/null; then
     echo ""
     echo "==========================================="
-    echo "  Установка Xray VPN уже запущена в tmux"
+    echo "  $(t "Установка Xray VPN уже запущена в tmux" "Xray VPN install is already running in tmux")"
     echo "==========================================="
     echo ""
-    echo "Посмотреть прогресс:"
+    echo "$(t "Посмотреть прогресс:" "View progress:")"
     echo "   tmux attach -t vpn"
     echo "   tail -f /var/log/xray-vpn-install.log"
     echo ""
-    echo "Перезапустить полностью:"
+    echo "$(t "Перезапустить полностью:" "Restart fully:")"
     echo "   tmux kill-session -t vpn && curl -fsSL ${SCRIPT_URL} | bash"
     echo ""
-    echo "После завершения установки используй команду: vpn"
+    echo "$(t "После завершения установки используй команду: vpn" "After install use: vpn")"
     echo ""
     exit 0
   fi
@@ -99,14 +99,14 @@ if [ -z "${TMUX:-}" ]; then
   if [ "$RUN_VIA_PIPE" = true ] || [ ! -t 0 ] || [ ! -t 1 ]; then
     echo ""
     echo "==========================================="
-    echo "  Xray VPN — подготовка к установке"
+    echo "  $(t "Xray VPN — подготовка к установке" "Xray VPN — install preparation")"
     echo "==========================================="
     echo ""
 
     s="/tmp/xray-install.sh"
-    echo "Скачиваю свежую версию установщика..."
+    echo "$(t "Скачиваю свежую версию установщика..." "Downloading latest installer...")"
     if ! curl -fsSL "$SCRIPT_URL" -o "$s"; then
-      echo "[ОШИБКА] Не удалось скачать установщик. Проверь интернет."
+      echo "[$(t "ОШИБКА" "ERROR")] $(t "Не удалось скачать установщик. Проверь интернет." "Failed to download installer. Check internet.")"
       echo "   curl -fsSL ${SCRIPT_URL}"
       exit 1
     fi
@@ -120,30 +120,30 @@ if [ -z "${TMUX:-}" ]; then
 
     touch /var/log/xray-vpn-install.log 2>/dev/null || true
 
-    echo "Установка запущена в фоновой сессии tmux 'vpn'."
+    echo "$(t "Установка запущена в фоновой сессии tmux 'vpn'." "Install started in background tmux session 'vpn'.")"
     echo ""
-    echo "Что делать:"
-    echo "   1. НЕ закрывайте это окно сразу — подождите 2-3 минуты."
-    echo "   2. Чтобы смотреть прогресс в реальном времени:"
+    echo "$(t "Что делать:" "What to do:")"
+    echo "   1. $(t "НЕ закрывайте это окно сразу — подождите 2-3 минуты." "DO NOT close this window immediately — wait 2-3 minutes.")"
+    echo "   2. $(t "Чтобы смотреть прогресс в реальном времени:" "To watch live progress:")"
     echo "         tmux attach -t vpn"
-    echo "   3. Чтобы проверить лог:"
+    echo "   3. $(t "Чтобы проверить лог:" "To check the log:")"
     echo "         tail -f /var/log/xray-vpn-install.log"
-    echo "   4. После завершения используй команду:"
+    echo "   4. $(t "После завершения используй команду:" "After completion use command:")"
     echo "         vpn"
     echo ""
-    echo "Если прервали случайно (Ctrl+Z / отвал SSH) — ничего страшного:"
-    echo "   tmux attach -t vpn   продолжит установку."
+    echo "$(t "Если прервали случайно (Ctrl+Z / отвал SSH) — ничего страшного:" "If interrupted (Ctrl+Z / SSH drop) — no problem:")"
+    echo "   tmux attach -t vpn   $(t "продолжит установку." "will continue install.")"
     echo ""
-    echo "Чтобы перезапустить полностью:"
+    echo "$(t "Чтобы перезапустить полностью:" "To restart fully:")"
     echo "   tmux kill-session -t vpn && curl -fsSL ${SCRIPT_URL} | bash"
     echo ""
-    echo "Запущено. Можете подключиться: tmux attach -t vpn"
+    echo "$(t "Запущено. Можете подключиться:" "Started. You can attach:") tmux attach -t vpn"
     exit 0
   fi
 
   # интерактив — уходим в tmux
   if command -v tmux >/dev/null 2>&1; then
-    echo "Переходим в tmux 'vpn' для стабильности..."
+    echo "$(t "Переходим в tmux 'vpn' для стабильности..." "Switching to tmux 'vpn' for stability...")"
     tmux kill-session -t vpn 2>/dev/null || true
     tmux new-session -d -s vpn
     tmux send-keys -t vpn "bash $0 ${@}" C-m
@@ -169,6 +169,30 @@ elif [ $# -gt 0 ] && [[ "$1" =~ ^(status|restart|speed|logs|info|diag)$ ]]; then
 fi
 
 # (tmux handling is all at the very top for reliable curl | bash + no attach required)
+
+# ==================== ЛОКАЛИЗАЦИЯ ====================
+# Определяем, поддерживает ли терминал русский (UTF-8).
+# Если нет — переключаемся на английский, чтобы не было кракозябр.
+USE_RU="yes"
+if [[ "${LANG:-}" != *UTF-8* && "${LANG:-}" != *utf8* && "${LC_ALL:-}" != *UTF-8* ]]; then
+  # Проверим, что locale вообще доступна
+  if command -v locale >/dev/null 2>&1; then
+    if ! locale charmap 2>/dev/null | grep -qiE 'UTF-?8'; then
+      USE_RU="no"
+    fi
+  fi
+fi
+
+# Функция перевода
+t() {
+  local ru="$1"
+  local en="$2"
+  if [[ "$USE_RU" == "yes" ]]; then
+    echo "$ru"
+  else
+    echo "$en"
+  fi
+}
 
 # ==================== ЦВЕТА ====================
 RED='\033[0;31m'
@@ -198,7 +222,7 @@ error()  { echo "[ошибка] $1" | tee -a "$INSTALL_LOG"; }
 print_header() {
   echo
   echo "================================================================"
-  echo "  XRAY VPN — автоматическая установка (Ubuntu)"
+  echo "  $(t "XRAY VPN — автоматическая установка (Ubuntu)" "XRAY VPN — automatic install (Ubuntu)")"
   echo "================================================================"
   echo
 }
@@ -1094,23 +1118,23 @@ post_install_menu() {
   if [[ $MANAGEMENT_MODE -eq 0 ]]; then
     save_info_file
     echo
-    success "Установка завершена!"
+    success "$(t "Установка завершена!" "Installation complete!")"
     echo
   fi
 
-  echo -e "${YELLOW}Меню управления Xray VPN${NC}"
+  echo -e "${YELLOW}$(t "Меню управления Xray VPN" "Xray VPN management menu")${NC}"
   echo
 
   while true; do
-    echo "1) Автоматическая настройка / добавить новые связки (с проверкой)"
-    echo "2) Показать данные панели и ссылки"
-    echo "3) Показать статус"
-    echo "4) Перезапустить сервисы"
-    echo "5) Посмотреть логи"
-    echo "6) Проверить скорость и пинг"
-    echo "7) Выйти"
+    echo "1) $(t "Автоматическая настройка / добавить связки (с проверкой)" "Auto setup / add bundles (with verification)")"
+    echo "2) $(t "Показать данные панели и ссылки" "Show panel credentials and links")"
+    echo "3) $(t "Показать статус" "Show status")"
+    echo "4) $(t "Перезапустить сервисы" "Restart services")"
+    echo "5) $(t "Посмотреть логи" "View logs")"
+    echo "6) $(t "Проверить скорость и пинг" "Speed test and ping")"
+    echo "7) $(t "Выйти" "Exit")"
     echo
-    read -p "Выбери вариант [1-7]: " choice
+    read -p "$(t "Выбери вариант [1-7]: " "Choose option [1-7]: ")" choice
 
     case "$choice" in
       1)
@@ -1133,11 +1157,11 @@ post_install_menu() {
         ;;
       7)
         echo
-        success "Выход"
+        success "$(t "Выход" "Exit")"
         exit 0
         ;;
       *)
-        warn "Неверный выбор"
+        warn "$(t "Неверный выбор" "Invalid choice")"
         ;;
     esac
     echo
@@ -1259,14 +1283,14 @@ main() {
   install_management_command
   echo "  [ГОТОВО] финальная настройка завершена" | tee -a "$INSTALL_LOG"
 
-  success "Установка завершена. Все проверки пройдены."
+  success "$(t "Установка завершена. Все проверки пройдены." "Installation complete. All checks passed.")"
 
   echo "" | tee -a "$INSTALL_LOG"
   echo "===========================================" | tee -a "$INSTALL_LOG"
-  echo "  УСТАНОВКА ЗАВЕРШЕНА" | tee -a "$INSTALL_LOG"
+  echo "  $(t "УСТАНОВКА ЗАВЕРШЕНА" "INSTALLATION COMPLETE")" | tee -a "$INSTALL_LOG"
   echo "===========================================" | tee -a "$INSTALL_LOG"
-  echo "  Введите vpn  — для меню управления" | tee -a "$INSTALL_LOG"
-  echo "  Введите vpn info  — чтобы увидеть данные панели" | tee -a "$INSTALL_LOG"
+  echo "  $(t "Введите vpn  — для меню управления" "Type vpn  for management menu")" | tee -a "$INSTALL_LOG"
+  echo "  $(t "Введите vpn info  — чтобы увидеть данные панели" "Type vpn info  to show panel credentials")" | tee -a "$INSTALL_LOG"
   echo "===========================================" | tee -a "$INSTALL_LOG"
   echo "" | tee -a "$INSTALL_LOG"
 
