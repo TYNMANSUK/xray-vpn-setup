@@ -618,17 +618,13 @@ reset_panel_password() {
   PANEL_PASS="$new_pass"
   export PANEL_USER PANEL_PASS
 
-  log "$(t "Сброс пароля панели (с таймаутом 15 сек)..." "Resetting panel password (15 sec timeout)...")"
+  log "$(t "Сброс пароля панели (с таймаутом 30 сек)..." "Resetting panel password (30 sec timeout)...")"
 
-  # Пробуем через x-ui setting (если поддерживается). Иногда x-ui setting зависает — ставим таймаут.
-  if timeout 15 /usr/local/x-ui/x-ui setting --help 2>&1 | grep -qi "username"; then
-    if timeout 15 /usr/local/x-ui/x-ui setting --username "$new_user" --password "$new_pass" >> "$INSTALL_LOG" 2>&1; then
-      success "$(t "Пароль панели сброшен на новый (для автонастройки)" "Panel password reset to new one (for auto setup)")"
-    else
-      warn "$(t "x-ui setting не ответил вовремя, но credentials сохранены." "x-ui setting timed out, but credentials are saved.")"
-    fi
+  # Сразу пробуем сбросить пароль. Предварительная проверка --help часто не работает.
+  if timeout 30 /usr/local/x-ui/x-ui setting --username "$new_user" --password "$new_pass" >> "$INSTALL_LOG" 2>&1; then
+    success "$(t "Пароль панели сброшен на новый (для автонастройки)" "Panel password reset to new one (for auto setup)")"
   else
-    warn "$(t "x-ui setting не поддерживает смену пароля (или не отвечает)." "x-ui setting does not support password change (or not responding).")"
+    warn "$(t "x-ui setting не ответил вовремя, но credentials сохранены." "x-ui setting timed out, but credentials are saved.")"
   fi
 }
 
