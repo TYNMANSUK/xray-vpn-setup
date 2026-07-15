@@ -65,7 +65,7 @@ if [ -z "${TMUX:-}" ]; then
   # piped режим — detached + exit
   if [ "$RUN_VIA_PIPE" = true ] || [ ! -t 0 ] || [ ! -t 1 ]; then
     echo "[INFO] piped режим — запускаю установку в detached tmux 'vpn'..."
-    local s="/tmp/xray-install.sh"
+    s="/tmp/xray-install.sh"
     if [[ ! -f "$s" ]]; then
       curl -fsSL https://raw.githubusercontent.com/TYNMANSUK/xray-vpn-setup/main/install.sh -o "$s"
       chmod +x "$s"
@@ -102,11 +102,7 @@ elif [ $# -gt 0 ] && [[ "$1" =~ ^(status|restart|speed|logs|info|diag)$ ]]; then
   SUBCOMMAND="$1"
 fi
 
-# ==================== АВТО TMUX (защита от обрыва SSH) ====================
-# Правило:
-# - Если у нас есть настоящий терминал (не пайп) и мы не в tmux — перезапускаемся в tmux 'vpn'.
-# - Если запущено через `curl | bash` (нет tty) — НЕ пытаемся запускать tmux (иначе ошибка "not a terminal").
-#   Просто ставим tmux и продолжаем. Пользователь может потом сам использовать tmux.
+# (duplicate AUTO TMUX section removed to clean up the script)
 
 if [ -z "${TMUX:-}" ]; then
   # Всегда стараемся иметь tmux (полезно для ручного использования)
@@ -143,7 +139,7 @@ if [ -z "${TMUX:-}" ]; then
       echo "[INFO] tmux установлен."
 
       # Скачиваем если нужно
-      local run_script="$0"
+      run_script="$0"
       if [[ "$SCRIPT_BASENAME" == "bash" || "$0" == /dev/fd/* || "$0" == "-" || ! -r "$0" ]]; then
         curl -fsSL https://raw.githubusercontent.com/TYNMANSUK/xray-vpn-setup/main/install.sh -o /tmp/xray-vpn-install.sh
         chmod +x /tmp/xray-vpn-install.sh
