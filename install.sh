@@ -77,15 +77,27 @@ if [ -z "${TMUX:-}" ]; then
     apt-get install -y tmux >/dev/null 2>&1 || true
   fi
 
-  # piped режим — detached + exit
+  # piped режим — запускаем в detached tmux, чтобы не падал SSH, и не было "not a terminal"
   if [ "$RUN_VIA_PIPE" = true ] || [ ! -t 0 ] || [ ! -t 1 ]; then
     echo "[INFO] piped режим — запускаю установку в detached tmux 'vpn'..."
+
+    # если сессия уже есть — не стартуем заново
+    if tmux has-session -t vpn 2>/dev/null; then
+      echo "[INFO] tmux сессия 'vpn' уже существует."
+      echo ">>> Подключись: tmux attach -t vpn"
+      exit 0
+    fi
+
     s="/tmp/xray-install.sh"
     if [[ ! -f "$s" ]]; then
       curl -fsSL https://raw.githubusercontent.com/TYNMANSUK/xray-vpn-setup/main/install.sh -o "$s"
       chmod +x "$s"
     fi
-    tmux new-session -d -s vpn "bash $s ${@}"
+
+    # Запускаем detached сессию, затем отправляем команду запустить скрипт
+    tmux new-session -d -s vpn
+    tmux send-keys -t vpn "bash $s ${@}" C-m
+
     echo ">>> Установка в tmux 'vpn'. Подключись: tmux attach -t vpn"
     echo ">>> Можешь закрывать эту сессию."
     exit 0
@@ -119,14 +131,15 @@ fi
 
 # (duplicate AUTO TMUX section removed to clean up the script)
 
-if [ -z "${TMUX:-}" ]; then
-  # Всегда стараемся иметь tmux (полезно для ручного использования)
-  if ! command -v tmux >/dev/null 2>&1; then
-    echo "[INFO] tmux не установлен — ставим..."
-    export DEBIAN_FRONTEND=noninteractive
-    apt-get update -y >/dev/null 2>&1 || true
-    apt-get install -y tmux >/dev/null 2>&1 || true
-  fi
+# (duplicate removed)
+# if [ -z "${TMUX:-}" ]; then
+#   # Всегда стараемся иметь tmux (полезно для ручного использования)
+#   if ! command -v tmux >/dev/null 2>&1; then
+#     echo "[INFO] tmux не установлен — ставим..."
+#     export DEBIAN_FRONTEND=noninteractive
+#     apt-get update -y >/dev/null 2>&1 || true
+#     apt-get install -y tmux >/dev/null 2>&1 || true
+#   fi
 
   # Пытаемся уйти в tmux ТОЛЬКО если:
   # - есть tmux
