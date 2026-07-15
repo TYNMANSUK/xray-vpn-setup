@@ -175,16 +175,12 @@ fi
 # (tmux handling is all at the very top for reliable curl | bash + no attach required)
 
 # ==================== ЛОКАЛИЗАЦИЯ ====================
-# Определяем, поддерживает ли терминал русский (UTF-8).
-# Если нет — переключаемся на английский, чтобы не было кракозябр.
-USE_RU="yes"
-if [[ "${LANG:-}" != *UTF-8* && "${LANG:-}" != *utf8* && "${LC_ALL:-}" != *UTF-8* ]]; then
-  # Проверим, что locale вообще доступна
-  if command -v locale >/dev/null 2>&1; then
-    if ! locale charmap 2>/dev/null | grep -qiE 'UTF-?8'; then
-      USE_RU="no"
-    fi
-  fi
+# Определяем, поддерживает ли терминал русский.
+# По умолчанию используем английский — он отображается в любом терминале.
+# Русский включается только если LANG/LC_ALL явно ru_RU.UTF-8.
+USE_RU="no"
+if [[ "${LANG:-}" == *ru_RU* || "${LC_ALL:-}" == *ru_RU* ]]; then
+  USE_RU="yes"
 fi
 
 # Функция перевода
