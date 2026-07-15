@@ -29,17 +29,20 @@ if [ $# -eq 0 ]; then
   set -- ""
 fi
 
+# Ensure log file exists early
+mkdir -p /var/log 2>/dev/null || true
+touch /var/log/xray-vpn-install.log 2>/dev/null || true
+chmod 644 /var/log/xray-vpn-install.log 2>/dev/null || true
+
 # ==================== РАННЯЯ ПРОВЕРКА СУЩЕСТВУЮЩЕЙ СЕССИИ ====================
 # Если tmux сессия 'vpn' уже есть, и мы не внутри неё - просто скажи подключиться.
 # Это позволяет "продолжить" с того места, где остановились (50% и т.д.).
 # Даже если прервалось на середине - attach покажет живой прогресс.
 if [ -z "${TMUX:-}" ]; then
   if tmux has-session -t vpn 2>/dev/null; then
-    echo "[INFO] tmux сессия 'vpn' уже существует."
-    echo "[INFO] Чтобы увидеть текущий прогресс установки (даже если на 50% или прервалось):"
-    echo "    tmux attach -t vpn"
-    echo "[INFO] НЕ запускай curl заново из другой сессии - это может запутать или начать по новой."
-    echo "[INFO] Если хочешь перезапустить - сначала убей старую сессию: tmux kill-session -t vpn"
+    echo "tmux 'vpn' уже запущен."
+    echo "Прогресс: tmux attach -t vpn   (или tail -f /var/log/xray-vpn-install.log)"
+    echo "Чтобы перезапустить полностью: tmux kill-session -t vpn && curl ... | bash"
     exit 0
   fi
 fi
@@ -51,17 +54,18 @@ if [[ "$0" == "bash" || "$0" == /dev/fd/* || "$0" == "-" || ! -t 0 || ! -t 1 ]];
   RUN_VIA_PIPE=true
 fi
 
-# Дополнительно: если очень мало RAM — сразу большой swap (на 2GB VPS критично)
+# Ранний swap для слабых VPS (2GB) — делаем ДО всего тяжёлого, даже до tmux
 if ! swapon --show | grep -q '/swapfile'; then
   mem_kb=$(awk '/MemTotal/ {print $2}' /proc/meminfo 2>/dev/null || echo 0)
-  if [ "$mem_kb" -gt 0 ] && [ "$mem_kb" -lt 2500000 ]; then  # меньше ~2.5GB
-    echo "[INFO] Мало RAM — создаём swap 2G сразу..."
+  if [ "$mem_kb" -gt 0 ] && [ "$mem_kb" -lt 2500000 ]; then
+    echo "  [ранний swap] Мало RAM — создаём 2G..."
     fallocate -l 2G /swapfile 2>/dev/null || dd if=/dev/zero of=/swapfile bs=1M count=2048 status=none
     chmod 600 /swapfile
     mkswap /swapfile >/dev/null 2>&1
     swapon /swapfile
     echo '/swapfile none swap sw 0 0' >> /etc/fstab 2>/dev/null || true
     sysctl -w vm.swappiness=10 >/dev/null 2>&1
+    echo "  [ранний swap] готов"
   fi
 fi
 
@@ -72,19 +76,19 @@ fi
 # - Если интерактив — уходим в tmux
 if [ -z "${TMUX:-}" ]; then
   if ! command -v tmux >/dev/null 2>&1; then
-    echo "[INFO] Ставим tmux..."
+    echo "Ставим tmux..."
     apt-get update -y >/dev/null 2>&1 || true
     apt-get install -y tmux >/dev/null 2>&1 || true
   fi
 
-  # piped режим — запускаем в detached tmux, чтобы не падал SSH, и не было "not a terminal"
+  # piped режим (curl | bash) — запускаем всё в detached tmux, показываем live через tail
   if [ "$RUN_VIA_PIPE" = true ] || [ ! -t 0 ] || [ ! -t 1 ]; then
-    echo "[INFO] piped режим — запускаю установку в detached tmux 'vpn'..."
+    echo "[проверка] tmux сессия..."
 
-    # если сессия уже есть — не стартуем заново
     if tmux has-session -t vpn 2>/dev/null; then
-      echo "[INFO] tmux сессия 'vpn' уже существует."
-      echo ">>> Подключись: tmux attach -t vpn"
+      echo "Сессия 'vpn' уже есть. Показываю текущий прогресс:"
+      echo "  tail -f /var/log/xray-vpn-install.log   или   tmux attach -t vpn"
+      tail -f /var/log/xray-vpn-install.log
       exit 0
     fi
 
@@ -94,25 +98,23 @@ if [ -z "${TMUX:-}" ]; then
       chmod +x "$s"
     fi
 
-    # Запускаем detached сессию, затем отправляем команду запустить скрипт
     tmux new-session -d -s vpn
-    tmux send-keys -t vpn "bash $s ${@}" C-m
+    tmux send-keys -t vpn "XRAY_VPN_IN_TMUX=1 bash $s ${@}" C-m
 
-    echo ">>> Установка в tmux 'vpn'. Подключись: tmux attach -t vpn"
-    echo ">>> Можешь закрывать эту сессию."
+    touch /var/log/xray-vpn-install.log 2>/dev/null || true
+    echo "Установка идёт в фоне (tmux 'vpn'). Прогресс:"
+    tail -f /var/log/xray-vpn-install.log
     exit 0
   fi
 
-  # интерактив — уходим в tmux (используем new + send + attach, чтобы избежать проблем с exec)
+  # интерактив — уходим в tmux
   if command -v tmux >/dev/null 2>&1; then
-    echo ">>> Уходим в tmux 'vpn'..."
+    echo "Переходим в tmux 'vpn' для стабильности..."
     tmux new-session -d -s vpn
     tmux send-keys -t vpn "bash $0 ${@}" C-m
     exec tmux attach -t vpn
   fi
 fi
-
-FIRST_ARG="${1:-}"
 
 # ==================== РЕЖИМ УПРАВЛЕНИЯ ====================
 # Поддержка: vpn, xray-vpn, vpn status, vpn restart, vpn speed, vpn logs и т.д.
@@ -131,66 +133,7 @@ elif [ $# -gt 0 ] && [[ "$1" =~ ^(status|restart|speed|logs|info|diag)$ ]]; then
   SUBCOMMAND="$1"
 fi
 
-# (duplicate AUTO TMUX section removed to clean up the script)
-
-# (duplicate auto-tmux removed for cleanliness)
-# if [ -z "${TMUX:-}" ]; then
-#   # Всегда стараемся иметь tmux (полезно для ручного использования)
-#   if ! command -v tmux >/dev/null 2>&1; then
-#     echo "[INFO] tmux не установлен — ставим..."
-#     export DEBIAN_FRONTEND=noninteractive
-#     apt-get update -y >/dev/null 2>&1 || true
-#     apt-get install -y tmux >/dev/null 2>&1 || true
-#   fi
-
-  # Пытаемся уйти в tmux ТОЛЬКО если:
-  # - есть tmux
-  # - есть реальный терминал
-  # - мы не в piped-режиме (curl | bash)
-  if command -v tmux >/dev/null 2>&1 && [ -t 0 ] && [ -t 1 ] && [ "$RUN_VIA_PIPE" != true ] && [[ "$SCRIPT_BASENAME" != "bash" && "$0" != /dev/fd/* && "$0" != "-" ]]; then
-    echo ""
-    echo ">>> Запускаю в tmux сессии 'vpn' (чтобы SSH не отвалился во время apt/установки)"
-    echo ">>> Если отвалится — зайди на сервер и набери: tmux attach -t vpn"
-    echo ""
-    sleep 1
-
-    if [[ "$SCRIPT_BASENAME" == "bash" || "$0" == /dev/fd/* || "$0" == "-" || ! -r "$0" ]]; then
-      curl -fsSL https://raw.githubusercontent.com/TYNMANSUK/xray-vpn-setup/main/install.sh -o /tmp/xray-vpn-install.sh
-      chmod +x /tmp/xray-vpn-install.sh
-      exec tmux new-session -s vpn "/tmp/xray-vpn-install.sh ${FIRST_ARG:-}"
-    else
-      exec tmux new-session -s vpn "bash $0 ${FIRST_ARG:-}"
-    fi
-  else
-    # piped / non-tty: не делаем interactive tmux launch
-    # Вместо этого: ставим tmux + запускаем ПОЛНУЮ установку в DETACHED tmux сессии.
-    # Текущая shell (откуда curl | bash) может быть закрыта сразу.
-    if [ -z "${TMUX:-}" ] && [ "$RUN_VIA_PIPE" = true ]; then
-      echo "[INFO] tmux установлен."
-
-      # Скачиваем если нужно
-      run_script="$0"
-      if [[ "$SCRIPT_BASENAME" == "bash" || "$0" == /dev/fd/* || "$0" == "-" || ! -r "$0" ]]; then
-        curl -fsSL https://raw.githubusercontent.com/TYNMANSUK/xray-vpn-setup/main/install.sh -o /tmp/xray-vpn-install.sh
-        chmod +x /tmp/xray-vpn-install.sh
-        run_script="/tmp/xray-vpn-install.sh"
-      fi
-
-      tmux new-session -d -s vpn "bash $run_script ${FIRST_ARG:-}"
-
-      echo ""
-      echo ">>> Установка запущена в фоновой tmux сессии 'vpn'."
-      echo ">>> Подключись: tmux attach -t vpn"
-      echo ">>> Можешь закрывать эту SSH-сессию — работа продолжится."
-      echo ""
-      exit 0
-    fi
-
-    if [ -z "${TMUX:-}" ]; then
-      echo "[INFO] tmux установлен. Продолжаю в текущей сессии."
-    fi
-  fi
-fi
+# (tmux handling is all at the very top for reliable curl | bash + no attach required)
 
 # ==================== ЦВЕТА ====================
 RED='\033[0;31m'
@@ -198,7 +141,7 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 CYAN='\033[0;36m'
-NC='\033[0m' # No Color
+NC='\033[0m'
 
 # ==================== ПЕРЕМЕННЫЕ ====================
 INSTALL_LOG="/var/log/xray-vpn-install.log"
@@ -211,64 +154,18 @@ PANEL_USER=""
 PANEL_PASS=""
 WEB_BASE_PATH="/"
 
-# ==================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ====================
-log()    { echo -e "${BLUE}[INFO]${NC} $1" | tee -a "$INSTALL_LOG"; }
-success(){ echo -e "${GREEN}[УСПЕХ]${NC} $1" | tee -a "$INSTALL_LOG"; }
-warn()   { echo -e "${YELLOW}[ВНИМАНИЕ]${NC} $1" | tee -a "$INSTALL_LOG"; }
-error()  { echo -e "${RED}[ОШИБКА]${NC} $1" | tee -a "$INSTALL_LOG"; }
-
-# Улучшенный спиннер: [работаем] + спиннер + последние 2 строки лога в реальном времени
-spinner() {
-  local pid=$1
-  local log_file=${2:-$INSTALL_LOG}
-  local delay=0.15
-  local spin='⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'
-  local i=0
-
-  while kill -0 "$pid" 2>/dev/null; do
-    local char="${spin:$i:1}"
-    i=$(( (i + 1) % ${#spin} ))
-
-    # Последние строки лога (максимум 2, обрезаем)
-    local status_line=""
-    if [[ -f "$log_file" ]]; then
-      status_line=$(tail -n 2 "$log_file" 2>/dev/null | sed 's/^ *//;s/ *$//' | tail -c 80 | tr '\n' ' ')
-    fi
-
-    # Выводим красивую строку
-    printf "\r${CYAN}[работаем]${NC} %s  ${YELLOW}%s${NC}" "$char" "$status_line"
-    sleep $delay
-  done
-
-  printf "\r\033[K"   # полностью очищаем текущую строку
-}
-
-# Запуск команды с спиннером + лог
-run_long() {
-  local desc="$1"
-  shift
-  log "$desc"
-  "$@" >> "$INSTALL_LOG" 2>&1 &
-  local pid=$!
-  spinner "$pid"
-  wait "$pid"
-  local status=$?
-  if [ $status -eq 0 ]; then
-    success "$desc — готово"
-  else
-    error "$desc — ошибка (смотри $INSTALL_LOG)"
-    return $status
-  fi
-}
+# ==================== ВСПОМОГАТЕЛЬНЫЕ (простой вывод, всё в лог) ====================
+log()    { echo "$1" | tee -a "$INSTALL_LOG"; }
+success(){ echo "[готово] $1" | tee -a "$INSTALL_LOG"; }
+warn()   { echo "[внимание] $1" | tee -a "$INSTALL_LOG"; }
+error()  { echo "[ошибка] $1" | tee -a "$INSTALL_LOG"; }
 
 print_header() {
-  clear
-  echo -e "${CYAN}"
-  echo "╔════════════════════════════════════════════════════════════╗"
-  echo "║           АВТОМАТИЧЕСКАЯ НАСТРОЙКА XRAY VPN                ║"
-  echo "║                  (Ubuntu • RU VPN • лучшие настройки)      ║"
-  echo "╚════════════════════════════════════════════════════════════╝"
-  echo -e "${NC}"
+  echo
+  echo "================================================================"
+  echo "  XRAY VPN — автоматическая установка (Ubuntu)"
+  echo "================================================================"
+  echo
 }
 
 check_root() {
@@ -295,103 +192,49 @@ detect_os() {
 
 # (tmux auto logic moved to early block above for curl | bash compatibility)
 
-# Дополнительная защита после suspend / просыпания VM
+# Лёгкая защита после suspend (даём системе прогреться)
 if [ "$(cat /proc/uptime | awk '{print int($1)}')" -lt 300 ]; then
-  echo "[INFO] VM недавно проснулась (возможно после suspend) — даём 25 сек на прогрев системы..."
-  sleep 25
-fi
-
-# Если swap ещё не создан — создаём его **самым первым** (критично для 2GB VPS)
-if ! swapon --show | grep -q '/swapfile'; then
-  echo "[INFO] Swap не найден — создаём 2G немедленно (чтобы не упала система)..."
-  fallocate -l 2G /swapfile 2>/dev/null || dd if=/dev/zero of=/swapfile bs=1M count=2048 status=none
-  chmod 600 /swapfile
-  mkswap /swapfile >/dev/null 2>&1
-  swapon /swapfile
-  grep -q '/swapfile' /etc/fstab || echo '/swapfile none swap sw 0 0' >> /etc/fstab
-  sysctl -w vm.swappiness=10 >/dev/null 2>&1
-  echo "[OK] Swap 2G создан и включён"
+  echo "[INFO] VM недавно проснулась — ждём 15 сек..." | tee -a /var/log/xray-vpn-install.log 2>/dev/null || true
+  sleep 15
 fi
 
 system_info() {
   local mem=$(free -m | awk '/Mem:/ {print $2}')
   local cpu=$(nproc)
-  local disk=$(df -h / | awk 'NR==2 {print $4}')
-  echo
-  log "RAM: ${mem}MB | CPU: ${cpu} ядер | Свободно на диске: ${disk}"
+  log "Система: RAM ${mem}MB | CPU ${cpu} ядер"
 }
 
-# ==================== 1. ОБНОВЛЕНИЕ СИСТЕМЫ ====================
-update_system() {
-  echo
-  log "Шаг 1/6: Обновление системы и установка базовых пакетов..."
-  echo -e "   ${YELLOW}Это может занять 1–4 минуты. Сейчас будет показан реальный вывод apt (это нормально и информативно).${NC}"
-  export DEBIAN_FRONTEND=noninteractive
-
-  # Показываем живой вывод apt, одновременно пишем в лог
-  echo ">>> Выполняется apt update..."
-  apt-get update -y 2>&1 | tee -a "$INSTALL_LOG"
-
-  echo ">>> Выполняется apt upgrade + установка необходимых пакетов..."
-  apt-get upgrade -y 2>&1 | tee -a "$INSTALL_LOG"
-  apt-get install -y curl wget jq unzip ca-certificates ufw fail2ban sqlite3 net-tools 2>&1 | tee -a "$INSTALL_LOG"
-
-  success "Система обновлена и базовые пакеты установлены"
-}
-
-# ==================== 2. УМНЫЙ SWAP ====================
+# ==================== УМНЫЙ SWAP ====================
 setup_swap() {
-  log "Ранняя настройка swap (для стабильности SSH на слабых VPS)..."
-
   local mem_mb=$(free -m | awk '/Mem:/ {print $2}')
-  local swap_size=1024
-
-  if [[ $mem_mb -le 1024 ]]; then
-    swap_size=2048
-  elif [[ $mem_mb -le 2048 ]]; then
-    swap_size=2048
-  elif [[ $mem_mb -le 4096 ]]; then
-    swap_size=2048
-  else
-    swap_size=1024
-  fi
+  local swap_size=2048
+  if [[ $mem_mb -le 1024 ]]; then swap_size=2048
+  elif [[ $mem_mb -le 4096 ]]; then swap_size=2048
+  else swap_size=1024; fi
 
   if swapon --show | grep -q '/swapfile'; then
-    log "Swap уже существует. Пропускаем создание."
     return
   fi
 
-  log "Создаём swapfile размером ${swap_size}MB (на основе ${mem_mb}MB RAM)..."
+  log "Создаём swap ${swap_size}MB..."
 
   swapoff /swapfile 2>/dev/null || true
   rm -f /swapfile
-
-  if command -v fallocate >/dev/null 2>&1; then
-    fallocate -l "${swap_size}M" /swapfile 2>/dev/null || dd if=/dev/zero of=/swapfile bs=1M count=$swap_size status=none
-  else
-    dd if=/dev/zero of=/swapfile bs=1M count=$swap_size status=none
-  fi
-
+  fallocate -l "${swap_size}M" /swapfile 2>/dev/null || dd if=/dev/zero of=/swapfile bs=1M count=$swap_size status=none
   chmod 600 /swapfile
   mkswap /swapfile >> "$INSTALL_LOG" 2>&1
   swapon /swapfile
 
-  if ! grep -q '^/swapfile ' /etc/fstab; then
-    echo '/swapfile none swap sw 0 0' >> /etc/fstab
-  fi
-
+  grep -q '^/swapfile ' /etc/fstab || echo '/swapfile none swap sw 0 0' >> /etc/fstab
   sysctl -w vm.swappiness=10 >> "$INSTALL_LOG" 2>&1
-  if ! grep -q 'vm.swappiness' /etc/sysctl.conf; then
-    echo 'vm.swappiness=10' >> /etc/sysctl.conf
-  fi
+  grep -q 'vm.swappiness' /etc/sysctl.conf || echo 'vm.swappiness=10' >> /etc/sysctl.conf
 
-  success "Swap создан: ${swap_size}MB, swappiness=10"
-  free -h | grep -E 'Mem|Swap' | tee -a "$INSTALL_LOG"
+  success "Swap готов (${swap_size}MB)"
 }
 
 # ==================== 3. ЛУЧШИЕ ОПТИМИЗАЦИИ (BBR + сеть) ====================
 apply_tuning() {
-  log "Шаг 2/6: Применяем лучшие сетевые оптимизации (BBR + буферы)..."
+  log "Применяем сетевые оптимизации (BBR)..."
 
   cat > /etc/sysctl.d/99-xray-vpn.conf << 'EOF'
 # xray-vpn — лучшие настройки для Xray / Reality
@@ -445,7 +288,7 @@ EOF
 
 # ==================== 4. FIREWALL ====================
 setup_firewall() {
-  log "Шаг 3/6: Настройка firewall (ufw)..."
+  log "Настройка firewall (ufw)..."
 
   ufw --force reset >> "$INSTALL_LOG" 2>&1 || true
   ufw default deny incoming >> "$INSTALL_LOG" 2>&1
@@ -462,7 +305,7 @@ setup_firewall() {
 
 # ==================== 5. FAIL2BAN ====================
 setup_fail2ban() {
-  log "Шаг 4/6: Установка и настройка fail2ban..."
+  log "Настройка fail2ban..."
 
   systemctl enable --now fail2ban >> "$INSTALL_LOG" 2>&1 || true
 
@@ -494,23 +337,18 @@ EOF
 
 # ==================== 6. УСТАНОВКА 3X-UI + XRAY ====================
 install_3x_ui() {
-  log "Шаг 5/6: Установка 3x-ui (Xray + панель)..."
+  log "Установка 3x-ui (Xray + панель)..."
 
-  # Идемпотентность: если уже установлено, пропускаем тяжёлую часть
+  # Идемпотентность: если уже установлено — функция не должна вызываться (проверяем снаружи)
   if [ -x /usr/local/x-ui/x-ui ]; then
-    log "3x-ui уже установлен (бинарник найден). Пропускаем повторную установку."
-    # Всё равно попробуем получить порт и т.д. из текущей настройки
     PANEL_PORT=$(/usr/local/x-ui/x-ui setting -show 2>/dev/null | grep -oP 'port:\s*\K[0-9]+' | head -1 || echo "2053")
     success "3x-ui уже готов"
     return
   fi
 
-  echo -e "   ${YELLOW}Скачиваем и запускаем официальный установщик. Будет видно прогресс.${NC}"
-
   rm -f "$XUI_INSTALL_LOG"
 
-  # Скачивание установщика с настоящим прогресс-баром
-  echo "  Скачивание установщика 3x-ui..."
+  echo "  Скачиваем официальный установщик 3x-ui..." | tee -a "$INSTALL_LOG"
   curl -L --progress-bar \
        -o /tmp/3xui_installer.sh \
        https://raw.githubusercontent.com/MHSanaei/3x-ui/master/install.sh 2>&1 | tee -a "$INSTALL_LOG"
@@ -520,39 +358,34 @@ install_3x_ui() {
     exit 1
   fi
 
-  log "  Запуск установщика 3x-ui (неинтерактивно)..."
-  echo -e "   ${YELLOW}Сейчас пойдёт вывод от официального установщика 3x-ui.${NC}"
-  echo -e "   ${YELLOW}Ты увидишь сообщения про скачивание Xray, создание сервиса и т.д. — это нормально.${NC}"
+  echo "  Запускаем установщик 3x-ui (может занять 1-3 минуты)..." | tee -a "$INSTALL_LOG"
   export DEBIAN_FRONTEND=noninteractive
 
-  # Показываем вывод установщика в реальном времени + в лог
-  yes n | bash /tmp/3xui_installer.sh 2>&1 | tee -a "$XUI_INSTALL_LOG"
+  # Полный вывод официального установщика (прогресс реальный)
+  yes n | bash /tmp/3xui_installer.sh 2>&1 | tee -a "$XUI_INSTALL_LOG" | tee -a "$INSTALL_LOG"
 
-  sleep 2
+  sleep 3
 
   if [[ -x /usr/local/x-ui/x-ui ]]; then
     success "3x-ui + Xray установлены"
   else
-    error "3x-ui не установился. Посмотри лог: $XUI_INSTALL_LOG"
+    error "3x-ui не установился. Смотри лог: $XUI_INSTALL_LOG"
     exit 1
   fi
 
-  # Пытаемся вытащить данные из лога установщика
+  # Извлекаем данные панели
   PANEL_PORT=$(grep -oP 'port:\s*\K[0-9]+' "$XUI_INSTALL_LOG" | tail -1 || true)
   PANEL_USER=$(grep -oP '(?i)username:?\s*\K\S+' "$XUI_INSTALL_LOG" | tail -1 || true)
   PANEL_PASS=$(grep -oP '(?i)password:?\s*\K\S+' "$XUI_INSTALL_LOG" | tail -1 || true)
 
-  # Если не нашли — пробуем через x-ui setting
   if [[ -z "$PANEL_PORT" ]]; then
     PANEL_PORT=$(/usr/local/x-ui/x-ui setting -show 2>/dev/null | grep -oP 'port:\s*\K[0-9]+' | head -1 || echo "2053")
   fi
 
-  # Открываем порт панели
   if [[ -n "$PANEL_PORT" ]]; then
     ufw allow "${PANEL_PORT}/tcp" comment '3x-ui Panel' >> "$INSTALL_LOG" 2>&1 || true
   fi
 
-  # Перезапускаем
   systemctl restart x-ui 2>/dev/null || true
 
   success "Xray + 3x-ui готовы"
@@ -560,7 +393,7 @@ install_3x_ui() {
 
 # ==================== УСТАНОВКА КОМАНДЫ ДЛЯ МЕНЮ ====================
 install_management_command() {
-  log "Шаг 6/6: Устанавливаем удобную команду управления (vpn / xray-vpn)..."
+  log "Устанавливаем удобные команды управления (vpn / xray-vpn)..."
 
   local install_dir="/opt/xray-vpn"
   local script_dest="$install_dir/install.sh"
@@ -1263,90 +1096,90 @@ main() {
     esac
   fi
 
-  print_header
+  : > "$INSTALL_LOG"
+
+  print_header | tee -a "$INSTALL_LOG"
   check_root
   detect_os
   system_info
 
   # Защита SSH от отвала во время тяжёлой установки
-  echo "Настраиваем SSH keepalive для стабильности соединения..."
+  echo "Настраиваем SSH keepalive для стабильности соединения..." | tee -a "$INSTALL_LOG"
   sed -i 's/^#*ClientAliveInterval.*/ClientAliveInterval 60/' /etc/ssh/sshd_config 2>/dev/null || true
   sed -i 's/^#*ClientAliveCountMax.*/ClientAliveCountMax 3/' /etc/ssh/sshd_config 2>/dev/null || true
   systemctl restart ssh 2>/dev/null || systemctl restart sshd 2>/dev/null || true
 
-  : > "$INSTALL_LOG"
-
-  # ВАЖНО: создаём swap как можно раньше, чтобы не отваливался SSH на слабых VPS
-  setup_swap
-
   log "Начинаем полную установку и настройку..."
-  echo "   (Ты сейчас внутри tmux 'vpn' — если SSH отвалится: просто зайди и набери 'tmux attach -t vpn')"
-  echo
+  echo "   (Если SSH отвалится — зайди на сервер и набери: tmux attach -t vpn)" | tee -a "$INSTALL_LOG"
+  echo | tee -a "$INSTALL_LOG"
 
-  # Шаг 1: Swap (самый ранний, критично для слабых VPS)
-  echo "[1/6] Проверка swap..."
+  # ==================== ЧИСТЫЕ ПОШАГОВЫЕ ПРОВЕРКИ ====================
+  # Стиль: Проверка -> настраиваем (если нужно) -> sleep -> настроил
+  # Всё идёт по очереди. Задержки между шагами для стабильности на слабых VPS.
+
+  # Шаг 1: Swap
+  echo "[1/6] Проверка swap..." | tee -a "$INSTALL_LOG"
   if swapon --show | grep -q '/swapfile'; then
-    echo "Swap уже настроен."
+    echo "  Уже настроен." | tee -a "$INSTALL_LOG"
   else
-    echo "настраиваем swap..."
+    echo "  настраиваем swap..." | tee -a "$INSTALL_LOG"
     setup_swap
-    sleep 5
-    echo "настроил swap"
+    sleep 6
+    echo "  настроил swap" | tee -a "$INSTALL_LOG"
   fi
 
-  # Шаг 2: BBR + оптимизации
-  echo "[2/6] Проверка BBR..."
+  # Шаг 2: BBR + сеть
+  echo "[2/6] Проверка BBR..." | tee -a "$INSTALL_LOG"
   if sysctl net.ipv4.tcp_congestion_control 2>/dev/null | grep -q bbr; then
-    echo "BBR уже настроен."
+    echo "  Уже настроен." | tee -a "$INSTALL_LOG"
   else
-    echo "настраиваем BBR + оптимизации..."
+    echo "  настраиваем BBR + оптимизации..." | tee -a "$INSTALL_LOG"
     apply_tuning
     sleep 5
-    echo "настроил BBR"
+    echo "  настроил BBR" | tee -a "$INSTALL_LOG"
   fi
 
   # Шаг 3: Firewall
-  echo "[3/6] Проверка firewall..."
+  echo "[3/6] Проверка firewall (ufw)..." | tee -a "$INSTALL_LOG"
   if ufw status 2>/dev/null | grep -q "Status: active"; then
-    echo "Firewall уже настроен."
+    echo "  Уже настроен." | tee -a "$INSTALL_LOG"
   else
-    echo "настраиваем firewall (ufw)..."
+    echo "  настраиваем firewall (ufw)..." | tee -a "$INSTALL_LOG"
     setup_firewall
     sleep 3
-    echo "настроил firewall"
+    echo "  настроил firewall" | tee -a "$INSTALL_LOG"
   fi
 
-  # Шаг 4: Fail2ban
-  echo "[4/6] Проверка fail2ban..."
+  # Шаг 4: fail2ban
+  echo "[4/6] Проверка fail2ban..." | tee -a "$INSTALL_LOG"
   if systemctl is-active fail2ban 2>/dev/null | grep -q active; then
-    echo "fail2ban уже настроен."
+    echo "  Уже настроен." | tee -a "$INSTALL_LOG"
   else
-    echo "настраиваем fail2ban..."
+    echo "  настраиваем fail2ban..." | tee -a "$INSTALL_LOG"
     setup_fail2ban
     sleep 3
-    echo "настроил fail2ban"
+    echo "  настроил fail2ban" | tee -a "$INSTALL_LOG"
   fi
 
-  # Шаг 5: 3x-ui
-  echo "[5/6] Проверка 3x-ui..."
+  # Шаг 5: 3x-ui / Xray
+  echo "[5/6] Проверка 3x-ui..." | tee -a "$INSTALL_LOG"
   if [ -x /usr/local/x-ui/x-ui ]; then
-    echo "3x-ui уже установлен."
+    echo "  Уже установлен." | tee -a "$INSTALL_LOG"
   else
-    echo "настраиваем 3x-ui (Xray + панель)..."
+    echo "  настраиваем 3x-ui (Xray + панель)..." | tee -a "$INSTALL_LOG"
     install_3x_ui
-    sleep 10
-    echo "настроил 3x-ui"
+    sleep 8
+    echo "  настроил 3x-ui" | tee -a "$INSTALL_LOG"
   fi
 
-  # Шаг 6: Меню и управление
-  echo "[6/6] Настройка команд управления..."
-  # Пытаемся сделать пароль удобным для автонастройки
+  # Шаг 6: Удобные команды + финал
+  echo "[6/6] Финальная настройка..." | tee -a "$INSTALL_LOG"
   reset_panel_password
-
-  # Устанавливаем команду для будущего вызова меню
   install_management_command
+  sleep 2
+  echo "  готово" | tee -a "$INSTALL_LOG"
 
-  success "Все основные шаги выполнены"
+  success "Установка завершена. Все проверки пройдены."
   post_install_menu
 }
 
