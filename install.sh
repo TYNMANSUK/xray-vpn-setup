@@ -613,55 +613,75 @@ reset_panel_password() {
 
   new_pass=$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c 14)
 
-  log "Сброс пароля панели (с таймаутом 15 сек)..."
+  log "$(t "Сброс пароля панели (с таймаутом 15 сек)..." "Resetting panel password (15 sec timeout)...")"
 
   # Пробуем через x-ui setting (если поддерживается). Иногда x-ui setting зависает — ставим таймаут.
   if timeout 15 /usr/local/x-ui/x-ui setting --help 2>&1 | grep -qi "username"; then
     if timeout 15 /usr/local/x-ui/x-ui setting --username "$new_user" --password "$new_pass" >> "$INSTALL_LOG" 2>&1; then
       PANEL_USER="$new_user"
       PANEL_PASS="$new_pass"
-      success "Пароль панели сброшен на новый (для автонастройки)"
+      # Экспортируем, чтобы точно были доступны везде
+      export PANEL_USER PANEL_PASS
+      success "$(t "Пароль панели сброшен на новый (для автонастройки)" "Panel password reset to new one (for auto setup)")"
     else
-      warn "Не удалось сбросить пароль через x-ui setting (таймаут или ошибка)."
-      warn "Зайди в панель вручную и поменяй пароль."
+      warn "$(t "Не удалось сбросить пароль через x-ui setting (таймаут или ошибка)." "Failed to reset password via x-ui setting (timeout or error).")"
+      warn "$(t "Зайди в панель вручную и поменяй пароль." "Log into panel manually and change password.")"
     fi
   else
-    warn "x-ui setting не поддерживает смену пароля (или не отвечает)."
+    warn "$(t "x-ui setting не поддерживает смену пароля (или не отвечает)." "x-ui setting does not support password change (or not responding).")"
   fi
 }
 
 save_info_file() {
+  # Убедимся, что логин/пароль не пустые перед сохранением
+  [[ -z "$PANEL_USER" ]] && PANEL_USER="admin"
+  [[ -z "$PANEL_PASS" ]] && PANEL_PASS="admin"
+
   mkdir -p "$(dirname "$INFO_FILE")"
   {
-    echo "=== АВТОМАТИЧЕСКАЯ НАСТРОЙКА XRAY VPN ($(date)) ==="
+    echo "=== XRAY VPN SETUP ($(date)) ==="
     echo "IP: $(curl -s4 ifconfig.me 2>/dev/null || hostname -I | awk '{print $1}')"
-    echo "Панель порт: ${PANEL_PORT}"
-    echo "Логин: ${PANEL_USER}"
-    echo "Пароль: ${PANEL_PASS}"
+    echo "Panel port: ${PANEL_PORT}"
+    echo "Username: ${PANEL_USER}"
+    echo "Password: ${PANEL_PASS}"
     echo ""
-    echo "Вход в панель: http://$(hostname -I | awk '{print $1}'):${PANEL_PORT}${WEB_BASE_PATH}"
+    echo "Panel URL: http://$(hostname -I | awk '{print $1}'):${PANEL_PORT}${WEB_BASE_PATH}"
     echo ""
-    echo "Swap и оптимизации применены"
-    echo "fail2ban активен"
-    echo "BBR активен (если поддерживается)"
+    echo "Swap and tuning applied"
+    echo "fail2ban active"
+    echo "BBR active (if supported)"
   } > "$INFO_FILE"
   chmod 600 "$INFO_FILE"
-  log "Данные сохранены в $INFO_FILE"
+  log "$(t "Данные сохранены в" "Data saved to") $INFO_FILE"
 }
 
 show_panel_info() {
+  # Подстраховка: если переменные пустые — попробуем прочитать из info-файла
+  if [[ -z "$PANEL_USER" || -z "$PANEL_PASS" ]] && [[ -f "$INFO_FILE" ]]; then
+    PANEL_USER=$(grep -iE '^login|логин' "$INFO_FILE" | head -1 | awk -F': ' '{print $2}')
+    PANEL_PASS=$(grep -iE '^password|пароль' "$INFO_FILE" | head -1 | awk -F': ' '{print $2}')
+  fi
+
+  # Если всё ещё пустые — попробуем стандартные admin/admin
+  if [[ -z "$PANEL_USER" ]]; then
+    PANEL_USER="admin"
+  fi
+  if [[ -z "$PANEL_PASS" ]]; then
+    PANEL_PASS="$(t "неизвестен (попробуйте admin / установленный пароль)" "unknown (try admin / your set password)")"
+  fi
+
   echo
-  echo -e "${GREEN}=== ДАННЫЕ ДЛЯ ВХОДА В ПАНЕЛЬ ===${NC}"
+  echo -e "${GREEN}=== $(t "ДАННЫЕ ДЛЯ ВХОДА В ПАНЕЛЬ" "PANEL LOGIN INFO") ===${NC}"
   local ip
   ip=$(curl -s4 ifconfig.me 2>/dev/null || hostname -I | awk '{print $1}')
   echo "IP: $ip"
-  echo "Порт панели: ${PANEL_PORT}"
-  echo "Логин: ${PANEL_USER}"
-  echo "Пароль: ${PANEL_PASS}"
+  echo "$(t "Порт панели" "Panel port"): ${PANEL_PORT}"
+  echo "$(t "Логин" "Username"): ${PANEL_USER}"
+  echo "$(t "Пароль" "Password"): ${PANEL_PASS}"
   echo
-  echo "Ссылка: http://${ip}:${PANEL_PORT}${WEB_BASE_PATH}"
+  echo "$(t "Ссылка" "URL"): http://${ip}:${PANEL_PORT}${WEB_BASE_PATH}"
   echo
-  echo "Файл с информацией: $INFO_FILE"
+  echo "$(t "Файл с информацией" "Info file"): $INFO_FILE"
   echo
 }
 
