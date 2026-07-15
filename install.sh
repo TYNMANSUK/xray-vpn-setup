@@ -2,6 +2,10 @@
 #
 # xray-vpn-install.sh
 # Автоматическая установка и настройка Xray VPN для Ubuntu VPS
+
+# Форсируем UTF-8, чтобы в tmux и на любом терминале был читаемый русский текст
+export LANG=C.UTF-8 2>/dev/null || export LANG=en_US.UTF-8 2>/dev/null || true
+export LC_ALL=C.UTF-8 2>/dev/null || export LC_ALL=en_US.UTF-8 2>/dev/null || true
 #
 # Делает:
 # - Умный swap, BBR + лучшие оптимизации
@@ -116,7 +120,7 @@ if [ -z "${TMUX:-}" ]; then
     tmux kill-session -t vpn 2>/dev/null || true
 
     tmux new-session -d -s vpn
-    tmux send-keys -t vpn "XRAY_VPN_IN_TMUX=1 bash $s ${@}" C-m
+    tmux send-keys -t vpn "export LANG=C.UTF-8 LC_ALL=C.UTF-8; XRAY_VPN_IN_TMUX=1 bash $s ${@}" C-m
 
     touch /var/log/xray-vpn-install.log 2>/dev/null || true
 
@@ -146,7 +150,7 @@ if [ -z "${TMUX:-}" ]; then
     echo "$(t "Переходим в tmux 'vpn' для стабильности..." "Switching to tmux 'vpn' for stability...")"
     tmux kill-session -t vpn 2>/dev/null || true
     tmux new-session -d -s vpn
-    tmux send-keys -t vpn "bash $0 ${@}" C-m
+    tmux send-keys -t vpn "export LANG=C.UTF-8 LC_ALL=C.UTF-8; bash $0 ${@}" C-m
     exec tmux attach -t vpn
   fi
 fi
