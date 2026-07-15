@@ -104,15 +104,13 @@ if [ -z "${TMUX:-}" ]; then
     echo ""
 
     s="/tmp/xray-install.sh"
-    if [[ ! -f "$s" ]]; then
-      echo "Скачиваю установщик..."
-      if ! curl -fsSL "$SCRIPT_URL" -o "$s"; then
-        echo "[ОШИБКА] Не удалось скачать установщик. Проверь интернет."
-        echo "   curl -fsSL ${SCRIPT_URL}"
-        exit 1
-      fi
-      chmod +x "$s"
+    echo "Скачиваю свежую версию установщика..."
+    if ! curl -fsSL "$SCRIPT_URL" -o "$s"; then
+      echo "[ОШИБКА] Не удалось скачать установщик. Проверь интернет."
+      echo "   curl -fsSL ${SCRIPT_URL}"
+      exit 1
     fi
+    chmod +x "$s"
 
     # Убиваем старую сессию, если она осталась с прошлого неудачного запуска
     tmux kill-session -t vpn 2>/dev/null || true
@@ -138,10 +136,6 @@ if [ -z "${TMUX:-}" ]; then
     echo ""
     echo "Чтобы перезапустить полностью:"
     echo "   tmux kill-session -t vpn && curl -fsSL ${SCRIPT_URL} | bash"
-    echo ""
-    echo "--- Текущий лог (первые строки) ---"
-    sleep 1
-    tail -n 20 /var/log/xray-vpn-install.log 2>/dev/null || true
     echo ""
     echo "Запущено. Можете подключиться: tmux attach -t vpn"
     exit 0
@@ -418,7 +412,7 @@ install_3x_ui() {
     if [[ -n "$PANEL_PORT" ]]; then
       ufw allow "${PANEL_PORT}/tcp" comment '3x-ui Panel' >> "$INSTALL_LOG" 2>&1 || true
     fi
-    systemctl restart x-ui 2>/dev/null || true
+    timeout 30 systemctl restart x-ui >> "$INSTALL_LOG" 2>&1 || true
     success "3x-ui уже готов"
     return
   fi
@@ -463,7 +457,7 @@ install_3x_ui() {
     ufw allow "${PANEL_PORT}/tcp" comment '3x-ui Panel' >> "$INSTALL_LOG" 2>&1 || true
   fi
 
-  systemctl restart x-ui 2>/dev/null || true
+  timeout 30 systemctl restart x-ui >> "$INSTALL_LOG" 2>&1 || true
 
   success "Xray + 3x-ui готовы"
 }
@@ -527,7 +521,7 @@ show_quick_status() {
 
 restart_services() {
   log "Перезапускаем сервисы..."
-  systemctl restart x-ui
+  systemctl restart x-ui 2>/dev/null || true
   systemctl restart xray 2>/dev/null || true
   systemctl restart fail2ban 2>/dev/null || true
   success "Сервисы перезапущены"
@@ -578,7 +572,7 @@ speed_test() {
 # ==================== ПОЛУЧЕНИЕ ДАННЫХ ПАНЕЛИ ====================
 get_panel_settings() {
   local out
-  out=$(/usr/local/x-ui/x-ui setting -show 2>/dev/null || true)
+  out=$(timeout 10 /usr/local/x-ui/x-ui setting -show 2>/dev/null || true)
 
   PANEL_PORT=$(echo "$out" | grep -oP 'port:\s*\K[0-9]+' | head -1 || echo "${PANEL_PORT:-2053}")
   WEB_BASE_PATH=$(echo "$out" | grep -oP 'webBasePath:\s*\K\S+' | head -1 || echo "/")
@@ -595,12 +589,20 @@ reset_panel_password() {
 
   new_pass=$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c 14)
 
-  # Пробуем через x-ui setting (если поддерживается)
-  if /usr/local/x-ui/x-ui setting --help 2>&1 | grep -qi "username"; then
-    /usr/local/x-ui/x-ui setting --username "$new_user" --password "$new_pass" 2>/dev/null || true
-    PANEL_USER="$new_user"
-    PANEL_PASS="$new_pass"
-    success "Пароль панели сброшен на новый (для автонастройки)"
+  log "Сброс пароля панели (с таймаутом 15 сек)..."
+
+  # Пробуем через x-ui setting (если поддерживается). Иногда x-ui setting зависает — ставим таймаут.
+  if timeout 15 /usr/local/x-ui/x-ui setting --help 2>&1 | grep -qi "username"; then
+    if timeout 15 /usr/local/x-ui/x-ui setting --username "$new_user" --password "$new_pass" >> "$INSTALL_LOG" 2>&1; then
+      PANEL_USER="$new_user"
+      PANEL_PASS="$new_pass"
+      success "Пароль панели сброшен на новый (для автонастройки)"
+    else
+      warn "Не удалось сбросить пароль через x-ui setting (таймаут или ошибка)."
+      warn "Зайди в панель вручную и поменяй пароль."
+    fi
+  else
+    warn "x-ui setting не поддерживает смену пароля (или не отвечает)."
   fi
 }
 
@@ -677,12 +679,12 @@ xui_login() {
   local csrf
   csrf=$(curl -sk -b "$JAR" -c "$JAR" "${base_url}csrf-token" 2>/dev/null | jq -r '.obj // empty' 2>/dev/null || true)
 
-  local header=""
-  [[ -n "$csrf" ]] && header="-H \"X-CSRF-Token: $csrf\""
+  local extra_args=()
+  [[ -n "$csrf" ]] && extra_args+=(-H "X-CSRF-Token: $csrf")
 
   local login_url="${base_url}login"
   local resp
-  resp=$(curl -sk -b "$JAR" -c "$JAR" $header \
+  resp=$(curl -sk -b "$JAR" -c "$JAR" "${extra_args[@]}" \
     --data-urlencode "username=${user}" \
     --data-urlencode "password=${pass}" \
     "$login_url" 2>/dev/null || true)
@@ -820,11 +822,11 @@ create_inbound() {
 
   local csrf
   csrf=$(curl -sk -b "$JAR" -c "$JAR" "${base_url}csrf-token" 2>/dev/null | jq -r '.obj // empty' 2>/dev/null || true)
-  local header=""
-  [[ -n "$csrf" ]] && header="-H \"X-CSRF-Token: $csrf\""
+  local extra_args=()
+  [[ -n "$csrf" ]] && extra_args+=(-H "X-CSRF-Token: $csrf")
 
   local resp
-  resp=$(curl -sk -b "$JAR" -c "$JAR" $header \
+  resp=$(curl -sk -b "$JAR" -c "$JAR" "${extra_args[@]}" \
     -H "Content-Type: application/json" \
     --data-raw "$payload" \
     "${base_url}panel/api/inbounds/add" 2>/dev/null || true)
@@ -1015,7 +1017,9 @@ auto_setup() {
   fi
 
   if ! xui_login "$PANEL_PORT" "$WEB_BASE_PATH" "$PANEL_USER" "$PANEL_PASS"; then
-    error "Не удалось войти в панель. Проверь данные вручную."
+    error "Не удалось войти в панель автоматически."
+    echo "Войди в панель вручную и создай инбаунды:"
+    show_panel_info
     return
   fi
 
@@ -1201,64 +1205,59 @@ main() {
   # Шаг 1: Swap
   echo "[1/6] Проверка swap..." | tee -a "$INSTALL_LOG"
   if swapon --show | grep -q '/swapfile'; then
-    echo "  Уже настроен." | tee -a "$INSTALL_LOG"
+    echo "  [ПРОПУСК] Swap уже настроен." | tee -a "$INSTALL_LOG"
   else
     echo "  настраиваем swap..." | tee -a "$INSTALL_LOG"
     setup_swap
-    sleep 6
-    echo "  настроил swap" | tee -a "$INSTALL_LOG"
+    echo "  [ГОТОВО] swap настроен" | tee -a "$INSTALL_LOG"
   fi
 
   # Шаг 2: BBR + сеть
   echo "[2/6] Проверка BBR..." | tee -a "$INSTALL_LOG"
   if sysctl net.ipv4.tcp_congestion_control 2>/dev/null | grep -q bbr; then
-    echo "  Уже настроен." | tee -a "$INSTALL_LOG"
+    echo "  [ПРОПУСК] BBR уже включён." | tee -a "$INSTALL_LOG"
   else
     echo "  настраиваем BBR + оптимизации..." | tee -a "$INSTALL_LOG"
     apply_tuning
-    sleep 5
-    echo "  настроил BBR" | tee -a "$INSTALL_LOG"
+    echo "  [ГОТОВО] BBR настроен" | tee -a "$INSTALL_LOG"
   fi
 
   # Шаг 3: Firewall
   echo "[3/6] Проверка firewall (ufw)..." | tee -a "$INSTALL_LOG"
   if ufw status 2>/dev/null | grep -q "Status: active"; then
-    echo "  Уже настроен." | tee -a "$INSTALL_LOG"
+    echo "  [ПРОПУСК] Firewall уже активен." | tee -a "$INSTALL_LOG"
   else
     echo "  настраиваем firewall (ufw)..." | tee -a "$INSTALL_LOG"
     setup_firewall
-    sleep 3
-    echo "  настроил firewall" | tee -a "$INSTALL_LOG"
+    echo "  [ГОТОВО] firewall настроен" | tee -a "$INSTALL_LOG"
   fi
 
   # Шаг 4: fail2ban
   echo "[4/6] Проверка fail2ban..." | tee -a "$INSTALL_LOG"
   if systemctl is-active fail2ban 2>/dev/null | grep -q active; then
-    echo "  Уже настроен." | tee -a "$INSTALL_LOG"
+    echo "  [ПРОПУСК] fail2ban уже запущен." | tee -a "$INSTALL_LOG"
   else
     echo "  настраиваем fail2ban..." | tee -a "$INSTALL_LOG"
     setup_fail2ban
-    sleep 3
-    echo "  настроил fail2ban" | tee -a "$INSTALL_LOG"
+    echo "  [ГОТОВО] fail2ban настроен" | tee -a "$INSTALL_LOG"
   fi
 
   # Шаг 5: 3x-ui / Xray
   echo "[5/6] Проверка 3x-ui..." | tee -a "$INSTALL_LOG"
   if [ -x /usr/local/x-ui/x-ui ]; then
-    echo "  Уже установлен." | tee -a "$INSTALL_LOG"
+    echo "  [ПРОПУСК] 3x-ui уже установлен. Обновляем данные панели..." | tee -a "$INSTALL_LOG"
+    install_3x_ui
   else
     echo "  настраиваем 3x-ui (Xray + панель)..." | tee -a "$INSTALL_LOG"
     install_3x_ui
-    sleep 8
-    echo "  настроил 3x-ui" | tee -a "$INSTALL_LOG"
+    echo "  [ГОТОВО] 3x-ui установлен" | tee -a "$INSTALL_LOG"
   fi
 
   # Шаг 6: Удобные команды + финал
   echo "[6/6] Финальная настройка..." | tee -a "$INSTALL_LOG"
   reset_panel_password
   install_management_command
-  sleep 2
-  echo "  готово" | tee -a "$INSTALL_LOG"
+  echo "  [ГОТОВО] финальная настройка завершена" | tee -a "$INSTALL_LOG"
 
   success "Установка завершена. Все проверки пройдены."
 
