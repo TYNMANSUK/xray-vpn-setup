@@ -613,19 +613,19 @@ reset_panel_password() {
 
   new_pass=$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c 14)
 
+  # Сохраняем credentials СРАЗУ, до попытки сброса, чтобы они были известны в любом случае
+  PANEL_USER="$new_user"
+  PANEL_PASS="$new_pass"
+  export PANEL_USER PANEL_PASS
+
   log "$(t "Сброс пароля панели (с таймаутом 15 сек)..." "Resetting panel password (15 sec timeout)...")"
 
   # Пробуем через x-ui setting (если поддерживается). Иногда x-ui setting зависает — ставим таймаут.
   if timeout 15 /usr/local/x-ui/x-ui setting --help 2>&1 | grep -qi "username"; then
     if timeout 15 /usr/local/x-ui/x-ui setting --username "$new_user" --password "$new_pass" >> "$INSTALL_LOG" 2>&1; then
-      PANEL_USER="$new_user"
-      PANEL_PASS="$new_pass"
-      # Экспортируем, чтобы точно были доступны везде
-      export PANEL_USER PANEL_PASS
       success "$(t "Пароль панели сброшен на новый (для автонастройки)" "Panel password reset to new one (for auto setup)")"
     else
-      warn "$(t "Не удалось сбросить пароль через x-ui setting (таймаут или ошибка)." "Failed to reset password via x-ui setting (timeout or error).")"
-      warn "$(t "Зайди в панель вручную и поменяй пароль." "Log into panel manually and change password.")"
+      warn "$(t "x-ui setting не ответил вовремя, но credentials сохранены." "x-ui setting timed out, but credentials are saved.")"
     fi
   else
     warn "$(t "x-ui setting не поддерживает смену пароля (или не отвечает)." "x-ui setting does not support password change (or not responding).")"
@@ -635,7 +635,7 @@ reset_panel_password() {
 save_info_file() {
   # Убедимся, что логин/пароль не пустые перед сохранением
   [[ -z "$PANEL_USER" ]] && PANEL_USER="admin"
-  [[ -z "$PANEL_PASS" ]] && PANEL_PASS="admin"
+  [[ -z "$PANEL_PASS" ]] && PANEL_PASS="$(t "неизвестен" "unknown")"
 
   mkdir -p "$(dirname "$INFO_FILE")"
   {
