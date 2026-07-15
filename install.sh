@@ -21,7 +21,12 @@
 #   bash install.sh
 #
 
-set -euo pipefail
+# НЕ используем set -e, потому что это инсталлятор: ошибки отдельных
+# команд (ufw, systemctl, x-ui setting) не должны убивать всё.
+set -uo pipefail
+
+# Глобальный URL скрипта — используем везде вместо магических ...
+SCRIPT_URL="https://raw.githubusercontent.com/TYNMANSUK/xray-vpn-setup/main/install.sh"
 
 # When run via `curl | bash` there are no arguments.
 # This prevents "unbound variable" error from set -u.
@@ -35,14 +40,23 @@ touch /var/log/xray-vpn-install.log 2>/dev/null || true
 chmod 644 /var/log/xray-vpn-install.log 2>/dev/null || true
 
 # ==================== РАННЯЯ ПРОВЕРКА СУЩЕСТВУЮЩЕЙ СЕССИИ ====================
-# Если tmux сессия 'vpn' уже есть, и мы не внутри неё - просто скажи подключиться.
-# Это позволяет "продолжить" с того места, где остановились (50% и т.д.).
-# Даже если прервалось на середине - attach покажет живой прогресс.
+# Если tmux сессия 'vpn' уже есть, и мы не внутри неё - покажем статус.
 if [ -z "${TMUX:-}" ]; then
   if tmux has-session -t vpn 2>/dev/null; then
-    echo "tmux 'vpn' уже запущен."
-    echo "Прогресс: tmux attach -t vpn   (или tail -f /var/log/xray-vpn-install.log)"
-    echo "Чтобы перезапустить полностью: tmux kill-session -t vpn && curl ... | bash"
+    echo ""
+    echo "==========================================="
+    echo "  Установка Xray VPN уже запущена в tmux"
+    echo "==========================================="
+    echo ""
+    echo "Посмотреть прогресс:"
+    echo "   tmux attach -t vpn"
+    echo "   tail -f /var/log/xray-vpn-install.log"
+    echo ""
+    echo "Перезапустить полностью:"
+    echo "   tmux kill-session -t vpn && curl -fsSL ${SCRIPT_URL} | bash"
+    echo ""
+    echo "После завершения установки используй команду: vpn"
+    echo ""
     exit 0
   fi
 fi
@@ -81,35 +95,62 @@ if [ -z "${TMUX:-}" ]; then
     apt-get install -y tmux >/dev/null 2>&1 || true
   fi
 
-  # piped режим (curl | bash) — запускаем всё в detached tmux, показываем live через tail
+  # piped режим (curl | bash) — запускаем всё в detached tmux и сразу выходим
   if [ "$RUN_VIA_PIPE" = true ] || [ ! -t 0 ] || [ ! -t 1 ]; then
-    echo "[проверка] tmux сессия..."
-
-    if tmux has-session -t vpn 2>/dev/null; then
-      echo "Сессия 'vpn' уже есть. Показываю текущий прогресс:"
-      echo "  tail -f /var/log/xray-vpn-install.log   или   tmux attach -t vpn"
-      tail -f /var/log/xray-vpn-install.log
-      exit 0
-    fi
+    echo ""
+    echo "==========================================="
+    echo "  Xray VPN — подготовка к установке"
+    echo "==========================================="
+    echo ""
 
     s="/tmp/xray-install.sh"
     if [[ ! -f "$s" ]]; then
-      curl -fsSL https://raw.githubusercontent.com/TYNMANSUK/xray-vpn-setup/main/install.sh -o "$s"
+      echo "Скачиваю установщик..."
+      if ! curl -fsSL "$SCRIPT_URL" -o "$s"; then
+        echo "[ОШИБКА] Не удалось скачать установщик. Проверь интернет."
+        echo "   curl -fsSL ${SCRIPT_URL}"
+        exit 1
+      fi
       chmod +x "$s"
     fi
+
+    # Убиваем старую сессию, если она осталась с прошлого неудачного запуска
+    tmux kill-session -t vpn 2>/dev/null || true
 
     tmux new-session -d -s vpn
     tmux send-keys -t vpn "XRAY_VPN_IN_TMUX=1 bash $s ${@}" C-m
 
     touch /var/log/xray-vpn-install.log 2>/dev/null || true
-    echo "Установка идёт в фоне (tmux 'vpn'). Прогресс:"
-    tail -f /var/log/xray-vpn-install.log
+
+    echo "Установка запущена в фоновой сессии tmux 'vpn'."
+    echo ""
+    echo "Что делать:"
+    echo "   1. НЕ закрывайте это окно сразу — подождите 2-3 минуты."
+    echo "   2. Чтобы смотреть прогресс в реальном времени:"
+    echo "         tmux attach -t vpn"
+    echo "   3. Чтобы проверить лог:"
+    echo "         tail -f /var/log/xray-vpn-install.log"
+    echo "   4. После завершения используй команду:"
+    echo "         vpn"
+    echo ""
+    echo "Если прервали случайно (Ctrl+Z / отвал SSH) — ничего страшного:"
+    echo "   tmux attach -t vpn   продолжит установку."
+    echo ""
+    echo "Чтобы перезапустить полностью:"
+    echo "   tmux kill-session -t vpn && curl -fsSL ${SCRIPT_URL} | bash"
+    echo ""
+    echo "--- Текущий лог (первые строки) ---"
+    sleep 1
+    tail -n 20 /var/log/xray-vpn-install.log 2>/dev/null || true
+    echo ""
+    echo "Запущено. Можете подключиться: tmux attach -t vpn"
     exit 0
   fi
 
   # интерактив — уходим в tmux
   if command -v tmux >/dev/null 2>&1; then
     echo "Переходим в tmux 'vpn' для стабильности..."
+    tmux kill-session -t vpn 2>/dev/null || true
     tmux new-session -d -s vpn
     tmux send-keys -t vpn "bash $0 ${@}" C-m
     exec tmux attach -t vpn
@@ -303,6 +344,37 @@ setup_firewall() {
   success "UFW включён (22 + 443 открыты)"
 }
 
+# ==================== РАННЕЕ СОЗДАНИЕ КОМАНДЫ VPN ====================
+# Делаем команду vpn доступной ПЕРЕД тяжёлой установкой.
+# Если установка ещё идёт — заглушка скажет подождать.
+install_early_management_command() {
+  local install_dir="/opt/xray-vpn"
+  local script_dest="$install_dir/install.sh"
+  local cmd_path="/usr/local/bin/xray-vpn"
+  local alt_cmd="/usr/local/bin/vpn"
+
+  mkdir -p "$install_dir" 2>/dev/null || true
+
+  # Скачиваем свежую версию скрипта, чтобы команда всегда работала
+  curl -fsSL "$SCRIPT_URL" -o "$script_dest" 2>/dev/null || true
+
+  chmod +x "$script_dest" 2>/dev/null || true
+
+  cat > "$cmd_path" << EOF
+#!/bin/bash
+# xray-vpn / vpn — управление Xray VPN
+if [[ -f "$script_dest" ]]; then
+  bash "$script_dest" "\$@"
+else
+  echo "Скрипт не найден. Переустановите: curl -fsSL ${SCRIPT_URL} | bash"
+  exit 1
+fi
+EOF
+
+  chmod +x "$cmd_path"
+  ln -sf "$cmd_path" "$alt_cmd" 2>/dev/null || true
+}
+
 # ==================== 5. FAIL2BAN ====================
 setup_fail2ban() {
   log "Настройка fail2ban..."
@@ -325,10 +397,10 @@ maxretry = 4
 bantime = 3600
 EOF
 
-  systemctl restart fail2ban >> "$INSTALL_LOG" 2>&1
+  systemctl restart fail2ban >> "$INSTALL_LOG" 2>&1 || true
   sleep 1
 
-  if systemctl is-active --quiet fail2ban; then
+  if systemctl is-active --quiet fail2ban 2>/dev/null; then
     success "fail2ban запущен и настроен"
   else
     warn "fail2ban установлен, но не запустился (проверь вручную)"
@@ -339,9 +411,14 @@ EOF
 install_3x_ui() {
   log "Установка 3x-ui (Xray + панель)..."
 
-  # Идемпотентность: если уже установлено — функция не должна вызываться (проверяем снаружи)
+  # Идемпотентность: если уже установлено — обновим настройки и выйдем
   if [ -x /usr/local/x-ui/x-ui ]; then
-    PANEL_PORT=$(/usr/local/x-ui/x-ui setting -show 2>/dev/null | grep -oP 'port:\s*\K[0-9]+' | head -1 || echo "2053")
+    log "3x-ui уже установлен — обновляем данные панели..."
+    get_panel_settings
+    if [[ -n "$PANEL_PORT" ]]; then
+      ufw allow "${PANEL_PORT}/tcp" comment '3x-ui Panel' >> "$INSTALL_LOG" 2>&1 || true
+    fi
+    systemctl restart x-ui 2>/dev/null || true
     success "3x-ui уже готов"
     return
   fi
@@ -1113,6 +1190,10 @@ main() {
   echo "   (Если SSH отвалится — зайди на сервер и набери: tmux attach -t vpn)" | tee -a "$INSTALL_LOG"
   echo | tee -a "$INSTALL_LOG"
 
+  # Создаём команду vpn как можно раньше, чтобы пользователь не увидел "command not found",
+  # если прервёт установку на середине.
+  install_early_management_command
+
   # ==================== ЧИСТЫЕ ПОШАГОВЫЕ ПРОВЕРКИ ====================
   # Стиль: Проверка -> настраиваем (если нужно) -> sleep -> настроил
   # Всё идёт по очереди. Задержки между шагами для стабильности на слабых VPS.
@@ -1180,6 +1261,16 @@ main() {
   echo "  готово" | tee -a "$INSTALL_LOG"
 
   success "Установка завершена. Все проверки пройдены."
+
+  echo "" | tee -a "$INSTALL_LOG"
+  echo "===========================================" | tee -a "$INSTALL_LOG"
+  echo "  УСТАНОВКА ЗАВЕРШЕНА" | tee -a "$INSTALL_LOG"
+  echo "===========================================" | tee -a "$INSTALL_LOG"
+  echo "  Введите vpn  — для меню управления" | tee -a "$INSTALL_LOG"
+  echo "  Введите vpn info  — чтобы увидеть данные панели" | tee -a "$INSTALL_LOG"
+  echo "===========================================" | tee -a "$INSTALL_LOG"
+  echo "" | tee -a "$INSTALL_LOG"
+
   post_install_menu
 }
 
