@@ -103,10 +103,12 @@ if [ -z "${TMUX:-}" ]; then
     exit 0
   fi
 
-  # интерактив — уходим в tmux
+  # интерактив — уходим в tmux (используем new + send + attach, чтобы избежать проблем с exec)
   if command -v tmux >/dev/null 2>&1; then
     echo ">>> Уходим в tmux 'vpn'..."
-    exec tmux new-session -s vpn "bash $0 ${@}"
+    tmux new-session -d -s vpn
+    tmux send-keys -t vpn "bash $0 ${@}" C-m
+    exec tmux attach -t vpn
   fi
 fi
 
@@ -131,7 +133,7 @@ fi
 
 # (duplicate AUTO TMUX section removed to clean up the script)
 
-# (duplicate removed)
+# (duplicate auto-tmux removed for cleanliness)
 # if [ -z "${TMUX:-}" ]; then
 #   # Всегда стараемся иметь tmux (полезно для ручного использования)
 #   if ! command -v tmux >/dev/null 2>&1; then
@@ -145,7 +147,7 @@ fi
   # - есть tmux
   # - есть реальный терминал
   # - мы не в piped-режиме (curl | bash)
-  if command -v tmux >/dev/null 2>&1 && [ -t 0 ] && [ -t 1 ] && [ "$RUN_VIA_PIPE" != true ]; then
+  if command -v tmux >/dev/null 2>&1 && [ -t 0 ] && [ -t 1 ] && [ "$RUN_VIA_PIPE" != true ] && [[ "$SCRIPT_BASENAME" != "bash" && "$0" != /dev/fd/* && "$0" != "-" ]]; then
     echo ""
     echo ">>> Запускаю в tmux сессии 'vpn' (чтобы SSH не отвалился во время apt/установки)"
     echo ">>> Если отвалится — зайди на сервер и набери: tmux attach -t vpn"
@@ -1281,12 +1283,63 @@ main() {
   echo "   (Ты сейчас внутри tmux 'vpn' — если SSH отвалится: просто зайди и набери 'tmux attach -t vpn')"
   echo
 
-  update_system
-  apply_tuning
-  setup_firewall
-  setup_fail2ban
-  install_3x_ui
+  # Шаг 1: Swap (самый ранний, критично для слабых VPS)
+  echo "[1/6] Проверка swap..."
+  if swapon --show | grep -q '/swapfile'; then
+    echo "Swap уже настроен."
+  else
+    echo "настраиваем swap..."
+    setup_swap
+    sleep 5
+    echo "настроил swap"
+  fi
 
+  # Шаг 2: BBR + оптимизации
+  echo "[2/6] Проверка BBR..."
+  if sysctl net.ipv4.tcp_congestion_control 2>/dev/null | grep -q bbr; then
+    echo "BBR уже настроен."
+  else
+    echo "настраиваем BBR + оптимизации..."
+    apply_tuning
+    sleep 5
+    echo "настроил BBR"
+  fi
+
+  # Шаг 3: Firewall
+  echo "[3/6] Проверка firewall..."
+  if ufw status 2>/dev/null | grep -q "Status: active"; then
+    echo "Firewall уже настроен."
+  else
+    echo "настраиваем firewall (ufw)..."
+    setup_firewall
+    sleep 3
+    echo "настроил firewall"
+  fi
+
+  # Шаг 4: Fail2ban
+  echo "[4/6] Проверка fail2ban..."
+  if systemctl is-active fail2ban 2>/dev/null | grep -q active; then
+    echo "fail2ban уже настроен."
+  else
+    echo "настраиваем fail2ban..."
+    setup_fail2ban
+    sleep 3
+    echo "настроил fail2ban"
+  fi
+
+  # Шаг 5: 3x-ui
+  echo "[5/6] Проверка 3x-ui..."
+  if [ -x /usr/local/x-ui/x-ui ]; then
+    echo "3x-ui уже установлен."
+  else
+    echo "настраиваем 3x-ui (Xray + панель)..."
+    install_3x_ui
+    sleep 10
+    echo "настроил 3x-ui"
+  fi
+
+  # Шаг 6: Меню и управление
+  echo "[6/6] Настройка команд управления..."
   # Пытаемся сделать пароль удобным для автонастройки
   reset_panel_password
 
