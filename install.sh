@@ -30,6 +30,7 @@ export LANG="${LANG:-C.UTF-8}"
 export LC_ALL="${LC_ALL:-C.UTF-8}"
 
 # ==================== КОНСТАНТЫ ====================
+SCRIPT_VERSION="2.0"
 SCRIPT_URL="https://raw.githubusercontent.com/TYNMANSUK/xray-vpn-setup/main/install.sh"
 REPO_URL="https://github.com/TYNMANSUK/xray-vpn-setup"
 XUI_INSTALLER_URL="https://raw.githubusercontent.com/MHSanaei/3x-ui/master/install.sh"
@@ -58,7 +59,7 @@ NC='\033[0m'
 # ==================== ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ (init для set -u) ====================
 MODE="install"       # install | manage
 SUBCMD="menu"
-NO_TMUX="false"
+USE_TMUX="false"     # по умолчанию БЕЗ tmux; включается флагом --tmux
 
 PANEL_PORT=""
 PANEL_USER=""
@@ -84,7 +85,7 @@ cecho()   { printf '%b\n' "$1"; }
 print_header() {
   echo
   echo "================================================================"
-  echo "        XRAY VPN — установка и настройка (Ubuntu)"
+  echo "        XRAY VPN — установка и настройка (Ubuntu)  v${SCRIPT_VERSION}"
   echo "================================================================"
   echo
 }
@@ -522,30 +523,24 @@ WRAP
 }
 
 # ==================== TMUX (запасной вариант для curl | bash) ====================
-# Основная защита от обрыва — резюмируемость (перезапуск продолжит).
-# tmux добавляет удобство: установка не прервётся при отвале SSH и её можно смотреть.
+# tmux ОПЦИОНАЛЕН (флаг --tmux). Основная защита от обрыва — резюмируемость:
+# перезапуск продолжает с незавершённого шага. tmux нужен, только если хочется,
+# чтобы установка крутилась дальше без переподключения.
 ensure_tmux_for_install() {
   [ -n "${TMUX:-}" ] && return 0                 # уже внутри tmux
-  [ "$NO_TMUX" = "true" ] && return 0            # явно отключено
-
-  local want="false"
-  [ ! -t 0 ] && want="true"                      # curl | bash
-  [ -n "${SSH_CONNECTION:-}" ] && want="true"    # по SSH — тоже лучше в tmux
-  [ "$want" = "true" ] || return 0               # локальный интерактив — без tmux
 
   command -v tmux >/dev/null 2>&1 || {
     export DEBIAN_FRONTEND=noninteractive
     apt-get update -y >/dev/null 2>&1 || true
     apt-get install -y tmux >/dev/null 2>&1 || true
   }
-  command -v tmux >/dev/null 2>&1 || return 0    # tmux не поставился — идём напрямую
+  command -v tmux >/dev/null 2>&1 || { warn "tmux недоступен — ставлю напрямую"; return 0; }
 
   download_self
   echo
   echo "==========================================="
   echo "  Запускаю установку в tmux-сессии 'vpn'"
   echo "==========================================="
-  echo "  Если связь оборвётся — установка продолжится сама."
   echo "  Смотреть прогресс:   tmux attach -t vpn"
   echo "  Лог:                 tail -f ${INSTALL_LOG}"
   echo
@@ -556,9 +551,7 @@ ensure_tmux_for_install() {
 
   touch "$INSTALL_LOG" 2>/dev/null || true
 
-  # Подключаемся к сессии. При `curl | bash` stdin — это пайп, а не терминал,
-  # поэтому tmux attach нужно кормить управляющим терминалом /dev/tty.
-  # Если /dev/tty недоступен (нет управляющего терминала) — оставляем в фоне.
+  # При `curl | bash` stdin — пайп, поэтому attach кормим терминалом /dev/tty.
   if { : < /dev/tty; } 2>/dev/null; then
     sleep 1
     exec tmux attach -t vpn < /dev/tty
@@ -1109,7 +1102,15 @@ install_flow() {
     echo "  vpn info   — данные панели и ссылки"        | tee -a "$INSTALL_LOG"
     echo "  vpn setup  — автонастройка связок"          | tee -a "$INSTALL_LOG"
     echo "===========================================" | tee -a "$INSTALL_LOG"
-    post_install_menu
+    # Меню открываем только при наличии терминала (интерактивный запуск).
+    # При `curl | bash` терминала на stdin нет — просто подсказываем команду vpn.
+    if [ -t 0 ]; then
+      post_install_menu
+    else
+      echo
+      echo "Дальше набери:  vpn setup   — чтобы создать рабочие связки"
+      echo "или просто:     vpn         — открыть меню"
+    fi
   else
     halt_resume "финальная проверка"
   fi
@@ -1142,7 +1143,8 @@ parse_args() {
       --manage)  MODE="manage" ;;
       --install) MODE="install" ;;
       --resume)  MODE="install" ;;
-      --no-tmux) NO_TMUX="true" ;;
+      --tmux)    USE_TMUX="true" ;;
+      --no-tmux) USE_TMUX="false" ;;
       status|restart|logs|speed|info|setup|add|reset-pass|pass|update|uninstall|menu)
         MODE="manage"; SUBCMD="$1" ;;
       "" ) ;;
@@ -1163,8 +1165,10 @@ main() {
   fi
 
   # режим установки
-  check_root                # быстрый отказ до tmux, если не root
-  ensure_tmux_for_install   # может уйти в tmux и не вернуться
+  check_root
+  if [ "$USE_TMUX" = "true" ]; then
+    ensure_tmux_for_install   # опционально по флагу --tmux, может уйти в tmux
+  fi
   install_flow
 }
 
