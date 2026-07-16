@@ -30,7 +30,7 @@ export LANG="${LANG:-C.UTF-8}"
 export LC_ALL="${LC_ALL:-C.UTF-8}"
 
 # ==================== КОНСТАНТЫ ====================
-SCRIPT_VERSION="2.0"
+SCRIPT_VERSION="2.1"
 SCRIPT_URL="https://raw.githubusercontent.com/TYNMANSUK/xray-vpn-setup/main/install.sh"
 REPO_URL="https://github.com/TYNMANSUK/xray-vpn-setup"
 XUI_INSTALLER_URL="https://raw.githubusercontent.com/MHSanaei/3x-ui/master/install.sh"
@@ -503,11 +503,14 @@ add_link() {
 download_self() {
   mkdir -p "$INSTALL_DIR" 2>/dev/null || true
   if [ -f "$0" ] && [ "$0" != "bash" ] && [ "$0" != "-" ] && [[ "$0" != /dev/fd/* ]] && [[ "$0" != /proc/* ]]; then
+    # запущено из файла — всегда обновляем локальную копию свежей версией
     cp "$0" "$SCRIPT_DEST" 2>/dev/null || true
-  fi
-  if [ ! -s "$SCRIPT_DEST" ]; then
+  else
+    # запущено через pipe (curl | bash) — тянем свежую копию с GitHub,
+    # чтобы команда vpn всегда указывала на актуальную версию
     curl -fsSL "$SCRIPT_URL" -o "$SCRIPT_DEST" 2>>"$INSTALL_LOG" || true
   fi
+  [ -s "$SCRIPT_DEST" ] || curl -fsSL "$SCRIPT_URL" -o "$SCRIPT_DEST" 2>>"$INSTALL_LOG" || true
   chmod +x "$SCRIPT_DEST" 2>/dev/null || true
 }
 
@@ -586,11 +589,18 @@ xray_bin_path() {
 generate_reality_keys() {
   local xb keys
   xb=$(xray_bin_path)
-  [ -z "$xb" ] && { err "Не найден бинарник xray"; return 1; }
+  [ -z "$xb" ] && { printf '[keys] xray binary not found\n' >> "$INSTALL_LOG" 2>/dev/null; return 1; }
   keys=$("$xb" x25519 2>/dev/null || true)
-  PRIVATE_KEY=$(printf '%s\n' "$keys" | grep -i 'Private' | awk '{print $NF}' | head -1)
-  PUBLIC_KEY=$(printf '%s\n'  "$keys" | grep -i  'Public' | awk '{print $NF}' | head -1)
-  [ -n "$PRIVATE_KEY" ] && [ -n "$PUBLIC_KEY" ]
+  # Формат вывода xray x25519 менялся между версиями:
+  #   старый:  "Private key: ..."  / "Public key: ..."
+  #   новый:   "PrivateKey: ..."   / "Password: ..."  (Password = публичный ключ)
+  PRIVATE_KEY=$(printf '%s\n' "$keys" | grep -i  'private'          | awk '{print $NF}' | head -1)
+  PUBLIC_KEY=$( printf '%s\n' "$keys" | grep -iE 'public|password'  | awk '{print $NF}' | head -1)
+  if [ -z "$PRIVATE_KEY" ] || [ -z "$PUBLIC_KEY" ]; then
+    printf '[keys] parse failed. x25519 output was:\n%s\n' "$keys" >> "$INSTALL_LOG" 2>/dev/null
+    return 1
+  fi
+  return 0
 }
 
 # ==================== АВТОНАСТРОЙКА: ВХОД В ПАНЕЛЬ ====================
@@ -702,7 +712,11 @@ create_inbound() {
     --data-raw "$payload" \
     "${base_url}panel/api/inbounds/add" 2>/dev/null || true)
 
-  echo "$resp" | grep -q '"success":true' || return 1
+  if ! echo "$resp" | grep -q '"success":true'; then
+    printf '[create_inbound] add failed (port=%s proto=%s fp=%s): %s\n' \
+      "$port" "$proto" "$fp" "$resp" >> "$INSTALL_LOG" 2>/dev/null
+    return 1
+  fi
 
   local ip link client_id_or_pass
   ip=$(server_ip)
