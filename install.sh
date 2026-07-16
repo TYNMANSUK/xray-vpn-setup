@@ -30,7 +30,7 @@ export LANG="${LANG:-C.UTF-8}"
 export LC_ALL="${LC_ALL:-C.UTF-8}"
 
 # ==================== КОНСТАНТЫ ====================
-SCRIPT_VERSION="2.1"
+SCRIPT_VERSION="2.2"
 SCRIPT_URL="https://raw.githubusercontent.com/TYNMANSUK/xray-vpn-setup/main/install.sh"
 REPO_URL="https://github.com/TYNMANSUK/xray-vpn-setup"
 XUI_INSTALLER_URL="https://raw.githubusercontent.com/MHSanaei/3x-ui/master/install.sh"
@@ -666,13 +666,13 @@ create_inbound() {
     protocol="trojan"
     password=$(openssl rand -hex 16 2>/dev/null)
     settings=$(jq -n --arg pass "$password" '{
-      clients: [{ password: $pass, email: "auto-trojan", limitIp: 0, totalGB: 0, expiryTime: 0, enable: true, tgId: "", subId: "", reset: 0 }],
+      clients: [{ password: $pass, email: "auto-trojan", limitIp: 0, totalGB: 0, expiryTime: 0, enable: true, tgId: 0, subId: "", reset: 0 }],
       fallbacks: []
     }')
   else
     protocol="vless"
     settings=$(jq -n --arg uuid "$uuid" --arg email "auto-${port}" --arg sub "$(openssl rand -hex 8)" '{
-      clients: [{ id: $uuid, flow: "xtls-rprx-vision", email: $email, limitIp: 0, totalGB: 0, expiryTime: 0, enable: true, tgId: "", subId: $sub, reset: 0 }],
+      clients: [{ id: $uuid, flow: "xtls-rprx-vision", email: $email, limitIp: 0, totalGB: 0, expiryTime: 0, enable: true, tgId: 0, subId: $sub, reset: 0 }],
       decryption: "none",
       fallbacks: []
     }')
