@@ -554,13 +554,20 @@ ensure_tmux_for_install() {
   tmux new-session -d -s vpn \
     "export LANG=C.UTF-8 LC_ALL=C.UTF-8; bash '${SCRIPT_DEST}' --install --no-tmux; echo; echo '[Установка завершена. Нажми Enter или закрой окно]'; exec bash"
 
-  if [ -t 1 ]; then
+  touch "$INSTALL_LOG" 2>/dev/null || true
+
+  # Подключаемся к сессии. При `curl | bash` stdin — это пайп, а не терминал,
+  # поэтому tmux attach нужно кормить управляющим терминалом /dev/tty.
+  # Если /dev/tty недоступен (нет управляющего терминала) — оставляем в фоне.
+  if { : < /dev/tty; } 2>/dev/null; then
     sleep 1
-    exec tmux attach -t vpn
-  else
-    echo "Установка идёт в фоне. Подключиться:  tmux attach -t vpn"
-    exit 0
+    exec tmux attach -t vpn < /dev/tty
   fi
+
+  echo "Установка идёт в фоновой tmux-сессии 'vpn'."
+  echo "Подключиться:   tmux attach -t vpn"
+  echo "Смотреть лог:   tail -f ${INSTALL_LOG}"
+  exit 0
 }
 
 # ==================== ПОДДЕРЖКА SSH ВО ВРЕМЯ УСТАНОВКИ ====================
