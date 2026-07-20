@@ -35,7 +35,7 @@ export LANG="${LANG:-C.UTF-8}"
 export LC_ALL="${LC_ALL:-C.UTF-8}"
 
 # ==================== КОНСТАНТЫ ====================
-SCRIPT_VERSION="2.4"
+SCRIPT_VERSION="2.6"
 SCRIPT_URL="https://raw.githubusercontent.com/TYNMANSUK/xray-vpn-setup/main/install.sh"
 REPO_URL="https://github.com/TYNMANSUK/xray-vpn-setup"
 XUI_INSTALLER_URL="https://raw.githubusercontent.com/MHSanaei/3x-ui/master/install.sh"
@@ -58,9 +58,12 @@ TOTAL_STEPS=6
 CDN_DIR="/opt/xray-vpn-cdn"
 CDN_CONFIG="${CDN_DIR}/config.json"
 CDN_XRAY_BIN="${CDN_DIR}/xray"
-CDN_BRIDGE="${CDN_DIR}/bridge.py"
 CDN_USERS="${CDN_DIR}/users.py"
-CDN_XRAY_PORT=4443
+CDN_XRAY_PORT=8003                 # локальный порт xray XHTTP (за Nginx)
+CDN_XHTTP_PATH="/api-test"
+CDN_PADDING_KEY="dc"
+CDN_NGINX_SITE="/etc/nginx/sites-available/xray-vpn-cdn.conf"
+CDN_NGINX_MAP="/etc/nginx/conf.d/xray-vpn-cdn-method.conf"
 CDN_ENV="${STATE_DIR}/cdn.env"
 
 # ==================== ЦВЕТА ====================
@@ -947,83 +950,55 @@ auto_setup() {
 # Прячет IP сервера за CDN, обходит блокировки по IP, транспорт XHTTP (быстрый).
 # Основано на obletcdn (Apache-2.0, (c) Gleb Bakulev), с изменениями.
 
-write_cdn_bridge() {
-  mkdir -p "$CDN_DIR"
-  cat > "$CDN_BRIDGE" << 'PYEOF'
-#!/usr/bin/env python3
-# CDN XHTTP bridge. Based on obletcdn (Apache-2.0, (c) Gleb Bakulev), modified.
-import os
-import re
-import select
-import socket
-import threading
-from http import HTTPStatus
+write_cdn_nginx() {
+  # map OPTIONS -> POST (клиент шлёт OPTIONS для Yandex CDN, xray ждёт POST-uplink)
+  cat > "$CDN_NGINX_MAP" << 'NGXMAP'
+map $request_method $xhttp_proxy_method {
+    default  $request_method;
+    OPTIONS  POST;
+}
+NGXMAP
 
-LISTEN_HOST, LISTEN_PORT = os.environ.get("CDN_XHTTP_LISTEN", "0.0.0.0:80").rsplit(":", 1)
-BACKEND_HOST, BACKEND_PORT = os.environ.get("CDN_XHTTP_BACKEND", "127.0.0.1:4443").rsplit(":", 1)
-SESSION_PATH = re.compile(rb"^/[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}(?:/\d+)?(?:\?.*)?$", re.I)
+  # сайт origin: HTTP:80, проксирует XHTTP-путь в локальный xray, отдаёт заглушку на /
+  cat > "$CDN_NGINX_SITE" << NGXSITE
+server {
+    listen 80 default_server;
+    listen [::]:80 default_server;
+    server_name _;
 
-LANDING = b"<!doctype html><title>Welcome</title><h1>Welcome</h1><p>Service is operating normally.</p>"
-NOT_FOUND = b"<!doctype html><title>404 Not Found</title><h1>404 Not Found</h1>"
+    client_max_body_size 0;
+    client_header_buffer_size 64k;
+    large_client_header_buffers 8 128k;
 
-def response(client, status, body=b""):
-    client.sendall(
-        f"HTTP/1.1 {status.value} {status.phrase}\r\n"
-        "Server: nginx\r\nConnection: close\r\n"
-        f"Content-Length: {len(body)}\r\nContent-Type: text/html; charset=utf-8\r\n\r\n".encode() + body
-    )
+    location = /cdn-check {
+        add_header X-CDN-Origin "ok" always;
+        add_header X-Origin-Method \$request_method always;
+        return 204;
+    }
 
-def relay(client, initial):
-    backend = socket.create_connection((BACKEND_HOST, int(BACKEND_PORT)), timeout=30)
-    try:
-        backend.sendall(initial)
-        sockets = [client, backend]
-        while True:
-            ready, _, failed = select.select(sockets, [], sockets, 60)
-            if failed or not ready:
-                return
-            for source in ready:
-                data = source.recv(65536)
-                if not data:
-                    return
-                (backend if source is client else client).sendall(data)
-    finally:
-        backend.close()
+    location ${CDN_XHTTP_PATH} {
+        proxy_pass http://127.0.0.1:${CDN_XRAY_PORT};
+        proxy_method \$xhttp_proxy_method;
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
+        proxy_pass_request_headers on;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_buffering off;
+        proxy_request_buffering off;
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+    }
 
-def handle(client):
-    try:
-        client.settimeout(30)
-        request = b""
-        while b"\r\n\r\n" not in request and len(request) < 16384:
-            chunk = client.recv(4096)
-            if not chunk:
-                return
-            request += chunk
-        parts = request.split(b"\r\n", 1)[0].split(b" ")
-        method = parts[0] if parts else b"GET"
-        path = parts[1] if len(parts) > 1 else b"/"
-        if SESSION_PATH.match(path):
-            relay(client, request)
-        elif method in (b"GET", b"HEAD") and path in (b"/", b"/index.html", b"/favicon.ico"):
-            response(client, HTTPStatus.OK, b"" if method == b"HEAD" else LANDING)
-        elif method == b"OPTIONS":
-            response(client, HTTPStatus.NO_CONTENT)
-        else:
-            response(client, HTTPStatus.NOT_FOUND, NOT_FOUND)
-    except OSError:
-        pass
-    finally:
-        client.close()
+    location / {
+        default_type text/html;
+        return 200 "<!doctype html><title>Welcome</title><h1>Welcome</h1><p>Service is operating normally.</p>";
+    }
+}
+NGXSITE
 
-server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-server.bind((LISTEN_HOST, int(LISTEN_PORT)))
-server.listen(128)
-while True:
-    conn, _ = server.accept()
-    threading.Thread(target=handle, args=(conn,), daemon=True).start()
-PYEOF
-  chmod 755 "$CDN_BRIDGE"
+  rm -f /etc/nginx/sites-enabled/default 2>/dev/null || true
+  ln -sfn "$CDN_NGINX_SITE" /etc/nginx/sites-enabled/xray-vpn-cdn.conf
 }
 
 write_cdn_users() {
@@ -1038,6 +1013,7 @@ import os
 import shutil
 import subprocess
 import sys
+import urllib.parse
 import uuid
 from pathlib import Path
 
@@ -1045,10 +1021,11 @@ CONFIG_PATH = Path("/opt/xray-vpn-cdn/config.json")
 XRAY_BIN = "/opt/xray-vpn-cdn/xray"
 SERVICE = "xray-vpn-cdn-xray.service"
 HAPP_XHTTP_EXTRA = {
-    "path": "/", "xPaddingKey": "_dc", "xPaddingHeader": "X-Cache",
-    "xPaddingMethod": "tokenish", "uplinkHTTPMethod": "GET",
-    "downlinkHTTPMethod": "GET", "xPaddingObfsMode": True,
-    "xPaddingPlacement": "queryInHeader", "mode": "packet-up",
+    "mode": "packet-up", "path": "/api-test",
+    "uplinkHTTPMethod": "OPTIONS",
+    "scMaxEachPostBytes": 1000000, "scMinPostsIntervalMs": 30, "scMaxBufferedPosts": 30,
+    "xPaddingObfsMode": True, "xPaddingKey": "dc", "xPaddingHeader": "X-Cache",
+    "xPaddingMethod": "tokenish", "xPaddingPlacement": "queryInHeader",
 }
 
 
@@ -1087,8 +1064,11 @@ def apply(config):
 
 def print_details(name, user_id, host, port, security):
     sni = f"&sni={host}" if security == "tls" else ""
+    extra = dict(HAPP_XHTTP_EXTRA)
+    extra["host"] = host
+    extra_q = "&extra=" + urllib.parse.quote(json.dumps(extra, separators=(",", ":")), safe="")
     link = (f"vless://{user_id}@{host}:{port}?encryption=none&type=xhttp&security={security}{sni}"
-            f"&host={host}&path=%2F&mode=packet-up#CDN-XHTTP-{name}")
+            f"&host={host}&path=%2Fapi-test&mode=packet-up{extra_q}#CDN-XHTTP-{name}")
     print(f"Created user `{name}`.")
     print(f"VLESS: {link}")
     print("Happ -> xHTTP -> extra -> Raw JSON:")
@@ -1162,11 +1142,17 @@ PYEOF
 }
 
 cdn_link() {
-  local uuid="$1" host="$2" port="$3" security="${4:-none}"
-  local sni=""
+  local uuid="$1" host="$2" port="$3" security="${4:-tls}" path="${5:-/api-test}"
+  local sni="" epath="%2F${path#/}"
   [ "$security" = "tls" ] && sni="&sni=${host}"
-  printf 'vless://%s@%s:%s?encryption=none&type=xhttp&security=%s%s&host=%s&path=%%2F&mode=packet-up#CDN-XHTTP' \
-    "$uuid" "$host" "$port" "$security" "$sni" "$host"
+  # extra: те же XHTTP-параметры, что и в ручном Raw JSON, но встроены в ссылку —
+  # современные клиенты (Happ/v2rayN) применяют их сами при импорте
+  local extra_json extra_enc extra_q=""
+  extra_json=$(printf '{"mode":"packet-up","path":"%s","host":"%s","uplinkHTTPMethod":"OPTIONS","scMaxEachPostBytes":1000000,"scMinPostsIntervalMs":30,"scMaxBufferedPosts":30,"xPaddingObfsMode":true,"xPaddingKey":"%s","xPaddingHeader":"X-Cache","xPaddingMethod":"tokenish","xPaddingPlacement":"queryInHeader"}' "$path" "$host" "$CDN_PADDING_KEY")
+  extra_enc=$(printf '%s\n' "$extra_json" | jq -Rr @uri 2>/dev/null || true)
+  [ -n "$extra_enc" ] && extra_q="&extra=${extra_enc}"
+  printf 'vless://%s@%s:%s?encryption=none&type=xhttp&security=%s%s&host=%s&path=%s&mode=packet-up%s#CDN-XHTTP' \
+    "$uuid" "$host" "$port" "$security" "$sni" "$host" "$epath" "$extra_q"
 }
 
 cdn_installed() {
@@ -1213,15 +1199,13 @@ cdn_write_config() {
     "streamSettings": {
       "network": "xhttp",
       "xhttpSettings": {
-        "path": "/",
-        "uplinkHTTPMethod": "GET",
-        "downlinkHTTPMethod": "GET",
-        "xPaddingKey": "_dc",
+        "mode": "packet-up",
+        "path": "${CDN_XHTTP_PATH}",
+        "xPaddingObfsMode": true,
+        "xPaddingKey": "${CDN_PADDING_KEY}",
         "xPaddingHeader": "X-Cache",
         "xPaddingMethod": "tokenish",
-        "xPaddingObfsMode": true,
-        "xPaddingPlacement": "queryInHeader",
-        "mode": "packet-up"
+        "xPaddingPlacement": "queryInHeader"
       }
     }
   }],
@@ -1232,7 +1216,6 @@ EOF
 }
 
 cdn_systemd() {
-  local port="$1"
   cat > /etc/systemd/system/xray-vpn-cdn-xray.service << EOF
 [Unit]
 Description=xray-vpn CDN XHTTP backend
@@ -1248,26 +1231,9 @@ LimitNOFILE=65535
 [Install]
 WantedBy=multi-user.target
 EOF
-
-  cat > /etc/systemd/system/xray-vpn-cdn-bridge.service << EOF
-[Unit]
-Description=xray-vpn CDN XHTTP bridge
-After=network-online.target xray-vpn-cdn-xray.service
-Wants=network-online.target
-
-[Service]
-Environment=CDN_XHTTP_LISTEN=0.0.0.0:${port}
-Environment=CDN_XHTTP_BACKEND=127.0.0.1:${CDN_XRAY_PORT}
-ExecStart=/usr/bin/python3 ${CDN_BRIDGE}
-Restart=on-failure
-RestartSec=3
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
   systemctl daemon-reload
-  systemctl enable --now xray-vpn-cdn-xray.service xray-vpn-cdn-bridge.service >>"$INSTALL_LOG" 2>&1 || true
+  systemctl enable xray-vpn-cdn-xray.service >>"$INSTALL_LOG" 2>&1 || true
+  systemctl restart xray-vpn-cdn-xray.service >>"$INSTALL_LOG" 2>&1 || true
 }
 
 cdn_save_env() {
@@ -1284,49 +1250,30 @@ EOF
 }
 
 cdn_provider_guide() {
-  local provider="$1" ip="$2" oport="$3" host="$4" cport="$5" security="$6"
+  local provider="$1" ip="$2" host="$3"
   echo
-  cecho "${GREEN}=== Настрой CDN (${provider}) — один раз, в панели провайдера ===${NC}"
-  echo "  Суть: CDN проксирует (НЕ кэширует) с источника ${ip}:${oport} по HTTP."
+  cecho "${GREEN}=== Настрой CDN (${provider}) — один раз, в панели ===${NC}"
+  echo "  Источник (origin):       ${ip}, порт 80, ПРОТОКОЛ ИСТОЧНИКА = HTTP (не HTTPS!)"
+  echo "  Основной домен (клиент): ${host}"
+  echo "  Сертификат клиент<->CDN: Let's Encrypt / Certificate Manager на ${host}"
+  echo "  Разрешённые методы:      GET, HEAD, OPTIONS (OPTIONS обязателен!)"
+  echo "  Кэш:                     отключить (TTL 0); сжатие и сегментацию — тоже off"
+  echo "  Заголовок Host к origin: любой (наш Nginx принимает любой)"
   case "$provider" in
-    "VK Cloud CDN")
-      echo "  1) CDN -> создать ресурс. Источник (origin): ${ip}, порт ${oport}, протокол HTTP."
-      echo "  2) Персональный домен: ${host}. Включи выпуск SSL (Let's Encrypt) и доступ конечных пользователей."
-      echo "  3) Кэш: TTL 0 / отключить (нужен проксинг, а не кэш)."
-      echo "  4) DNS: CNAME ${host} -> значение, которое покажет VK (edge-домен ресурса)."
-      ;;
     "Yandex Cloud CDN")
-      echo "  1) Активируй CDN-провайдер. Origin-группа: источник ${ip}:${oport}, протокол HTTP."
-      echo "  2) Создай CDN-ресурс, основной домен ${host}. Добавь TLS-сертификат (Certificate Manager / Let's Encrypt)."
-      echo "  3) Кэш: TTL 0 / отключить."
-      echo "  4) DNS: CNAME ${host} -> адрес CDN-балансировщика (раздел «Доменные имена ресурса»)."
+      echo "  DNS источника:  A-запись origin.<домен> -> ${ip} (или укажи IP напрямую в источнике)."
+      echo "  DNS клиента:    CNAME ${host} -> <id>.topology.gslb.yccdn.ru (из «Настройки DNS» ресурса)."
+      echo "  КЛЮЧЕВОЕ: в ресурсе «Протокол для запросов к источнику» = HTTP (у тебя стоит HTTPS — поменяй)."
       ;;
-    "Gcore")
-      echo "  1) CDN -> создать ресурс. Origin: ${ip}:${oport}, протокол HTTP."
-      echo "  2) Custom domain: ${host}, включи Let's Encrypt."
-      echo "  3) Кэш: отключить (cache expiration 0 / bypass)."
-      echo "  4) DNS: CNAME ${host} -> <твой>.gcdn.co (значение покажет Gcore)."
-      ;;
-    "Selectel")
-      echo "  1) CDN -> ресурс. Origin: ${ip}:${oport}, протокол HTTP."
-      echo "  2) Домен ${host}, SSL Let's Encrypt."
-      echo "  3) Кэш: отключить."
-      echo "  4) DNS: CNAME ${host} -> значение, которое покажет Selectel."
-      ;;
-    "Custom-HTTP")
-      echo "  1) В панели CDN: origin = ${ip}:${oport}, протокол HTTP, кэш off."
-      echo "  2) Клиент будет ходить по HTTP:${cport} (без TLS)."
-      echo "  3) DNS: направь ${host} на CDN по инструкции провайдера (CNAME/A на edge)."
+    "VK Cloud CDN"|"Gcore"|"Selectel")
+      echo "  DNS источника:  A-запись origin.<домен> -> ${ip}."
+      echo "  DNS клиента:    CNAME ${host} -> edge-домен, который выдаст провайдер."
       ;;
     *)
-      echo "  1) В панели CDN: origin = ${ip}:${oport}, протокол HTTP, кэш off."
-      echo "  2) Включи HTTPS для домена ${host} (сертификат Let's Encrypt у провайдера)."
-      echo "  3) DNS: CNAME ${host} -> edge-домен CDN (по инструкции провайдера)."
+      echo "  DNS источника:  A-запись origin.<домен> -> ${ip}."
+      echo "  DNS клиента:    CNAME ${host} -> edge-домен CDN (по инструкции провайдера)."
       ;;
   esac
-  if [ "$security" = "tls" ]; then
-    echo "  Клиент подключается по HTTPS:${cport} (CDN держит сертификат на ${host})."
-  fi
   echo "  Затем проверь:  vpn cdn-check"
   warn "Точные названия пунктов в панели могут отличаться от версии к версии."
 }
@@ -1336,48 +1283,43 @@ cdn_setup() {
   get_panel_settings   # чтобы save_info_file не затёр данные панели
   echo
   log "=== CDN-ПОДКЛЮЧЕНИЕ (XHTTP через CDN) ==="
-  log "Клиент -> CDN (росс. IP) -> этот сервер (origin) -> интернет."
-  log "Прячет IP сервера за CDN и обходит блокировки по IP. Транспорт XHTTP."
+  log "Клиент -> CDN (HTTPS) -> этот сервер: Nginx(:80) -> xray XHTTP -> интернет."
+  log "Схема под облачные CDN (Yandex/VK/Gcore/Selectel): метод OPTIONS + путь ${CDN_XHTTP_PATH}."
   echo
   warn "Нужен свой домен и аккаунт CDN. Сам CDN настраивается руками в панели —"
-  warn "скрипт поднимет origin и подскажет, что вписать именно под твой CDN."
+  warn "скрипт поднимет origin (Nginx+xray) и подскажет, что вписать под твой CDN."
   echo
 
-  command -v python3 >/dev/null 2>&1 || { apt-get update -y >>"$INSTALL_LOG" 2>&1; apt-get install -y python3 >>"$INSTALL_LOG" 2>&1 || true; }
-
   echo "  Какой у тебя CDN?"
-  echo "    1) VK Cloud CDN"
-  echo "    2) Yandex Cloud CDN"
+  echo "    1) Yandex Cloud CDN"
+  echo "    2) VK Cloud CDN"
   echo "    3) Gcore"
   echo "    4) Selectel"
   echo "    5) Другой (клиент по HTTPS:443)"
-  echo "    6) Другой (клиент по HTTP:80, как в obletcdn)"
-  read -rp "  Выбор [1-6]: " pc
-  local provider security
+  read -rp "  Выбор [1-5]: " pc
+  local provider security client_port
   case "$pc" in
-    1) provider="VK Cloud CDN";     security="tls" ;;
-    2) provider="Yandex Cloud CDN"; security="tls" ;;
-    3) provider="Gcore";            security="tls" ;;
-    4) provider="Selectel";         security="tls" ;;
-    6) provider="Custom-HTTP";      security="none" ;;
-    *) provider="Custom-HTTPS";     security="tls" ;;
+    1) provider="Yandex Cloud CDN" ;;
+    2) provider="VK Cloud CDN" ;;
+    3) provider="Gcore" ;;
+    4) provider="Selectel" ;;
+    *) provider="Custom-HTTPS" ;;
   esac
+  security="tls"; client_port=443
 
-  local host origin_port client_port uuid
-  read -rp "  Домен для CDN (например cdn.mydomain.xyz): " host
+  local host uuid
+  read -rp "  CDN-домен для клиентов (например cdn.mydomain.xyz): " host
   host=$(printf '%s' "$host" | tr -d ' ')
   [ -z "$host" ] && { err "Домен не указан"; return 1; }
-  read -rp "  Порт origin на сервере (CDN тянет отсюда) [80]: " origin_port
-  origin_port=$(printf '%s' "${origin_port:-80}" | tr -cd '0-9')
-  [ -z "$origin_port" ] && origin_port=80
 
-  if [ "$security" = "tls" ]; then client_port=443; else client_port="$origin_port"; fi
+  log "Ставлю пакеты (nginx, python3, xray)..."
+  export DEBIAN_FRONTEND=noninteractive
+  command -v nginx   >/dev/null 2>&1 || { apt-get update -y >>"$INSTALL_LOG" 2>&1; apt-get install -y nginx >>"$INSTALL_LOG" 2>&1 || true; }
+  command -v python3 >/dev/null 2>&1 || apt-get install -y python3 >>"$INSTALL_LOG" 2>&1 || true
 
-  if port_in_use "$origin_port"; then
-    warn "Порт ${origin_port} уже занят — bridge может не подняться."
-    read -rp "  Всё равно продолжить? (y/N): " a
-    case "$a" in y|Y) ;; *) return 1 ;; esac
-  fi
+  # миграция: убрать старый python-bridge прежней версии, если был
+  systemctl disable --now xray-vpn-cdn-bridge.service >>"$INSTALL_LOG" 2>&1 || true
+  rm -f /etc/systemd/system/xray-vpn-cdn-bridge.service "${CDN_DIR}/bridge.py" 2>/dev/null || true
 
   if [ -f "$CDN_ENV" ]; then . "$CDN_ENV"; fi
   uuid="${CDN_UUID:-}"
@@ -1385,68 +1327,83 @@ cdn_setup() {
 
   log "Готовлю xray для CDN..."
   cdn_prepare_xray_bin || { err "Не удалось подготовить бинарник xray"; return 1; }
-  write_cdn_bridge
   write_cdn_users
   cdn_write_config "$uuid"
-  cdn_systemd "$origin_port"
-  ufw allow "${origin_port}/tcp" comment 'CDN origin' >>"$INSTALL_LOG" 2>&1 || true
-  cdn_save_env "$host" "$origin_port" "$client_port" "$security" "$provider" "$uuid"
+  cdn_systemd
+
+  write_cdn_nginx
+  if nginx -t >>"$INSTALL_LOG" 2>&1; then
+    systemctl enable nginx >>"$INSTALL_LOG" 2>&1 || true
+    systemctl restart nginx >>"$INSTALL_LOG" 2>&1 || true
+    ok "Nginx настроен (origin на :80)"
+  else
+    err "Nginx-конфиг не прошёл проверку (nginx -t). Смотри лог: $INSTALL_LOG"
+  fi
+
+  ufw allow 80/tcp comment 'CDN origin' >>"$INSTALL_LOG" 2>&1 || true
+  cdn_save_env "$host" "80" "$client_port" "$security" "$provider" "$uuid"
   sleep 2
 
-  if curl -s --max-time 5 "http://127.0.0.1:${origin_port}/" 2>/dev/null | grep -qi 'welcome'; then
-    ok "origin отвечает на 127.0.0.1:${origin_port} (заглушка)"
+  local code
+  code=$(curl -s -o /dev/null -w '%{http_code}' -X OPTIONS --data-binary 'test' "http://127.0.0.1/cdn-check" 2>/dev/null || echo 000)
+  if [ "$code" = "204" ]; then
+    ok "origin локально отвечает (OPTIONS /cdn-check -> 204)"
   else
-    warn "origin пока не отвечает на 127.0.0.1:${origin_port} (systemctl status xray-vpn-cdn-bridge)"
+    warn "origin локально вернул код ${code} (ожидался 204). Проверь: systemctl status nginx xray-vpn-cdn-xray"
   fi
 
   local ip link
   ip=$(server_ip)
-  link=$(cdn_link "$uuid" "$host" "$client_port" "$security")
+  link=$(cdn_link "$uuid" "$host" "$client_port" "$security" "$CDN_XHTTP_PATH")
   # убираем прежние CDN-ссылки, чтобы не плодить дубли при повторной настройке
   if [ -f "$LINKS_FILE" ]; then
     grep -vE 'CDN-XHTTP|^# CDN ' "$LINKS_FILE" > "${LINKS_FILE}.tmp" 2>/dev/null || true
     mv "${LINKS_FILE}.tmp" "$LINKS_FILE" 2>/dev/null || true
   fi
-  add_link "# CDN (${provider}) | домен ${host} | origin ${ip}:${origin_port} | клиент :${client_port}/${security}"
+  add_link "# CDN (${provider}) | клиент ${host}:${client_port} | origin ${ip}:80 (HTTP) | путь ${CDN_XHTTP_PATH}"
   add_link "$link"
   add_link ""
   save_info_file
 
-  cdn_provider_guide "$provider" "$ip" "$origin_port" "$host" "$client_port" "$security"
+  cdn_provider_guide "$provider" "$ip" "$host"
 
   echo
   cecho "${GREEN}Ссылка для клиента (заработает после настройки CDN):${NC}"
   echo "  $link"
   echo
-  echo "Для Happ/xray-клиента в поле xHTTP extra (Raw JSON):"
+  echo "Ссылка выше уже содержит все параметры (extra) — Happ/v2rayN настроятся сами при импорте."
+  echo "Если клиент не подхватил extra или ругается на него — вставь JSON вручную в поле xHTTP extra:"
   cat << JEOF
-  { "path":"/", "host":"${host}", "mode":"packet-up",
-    "uplinkHTTPMethod":"GET", "downlinkHTTPMethod":"GET",
-    "xPaddingKey":"_dc", "xPaddingHeader":"X-Cache",
-    "xPaddingMethod":"tokenish", "xPaddingObfsMode":true,
-    "xPaddingPlacement":"queryInHeader" }
+  { "mode":"packet-up", "path":"${CDN_XHTTP_PATH}", "host":"${host}",
+    "uplinkHTTPMethod":"OPTIONS",
+    "scMaxEachPostBytes":1000000, "scMinPostsIntervalMs":30, "scMaxBufferedPosts":30,
+    "xPaddingObfsMode":true, "xPaddingKey":"${CDN_PADDING_KEY}", "xPaddingHeader":"X-Cache",
+    "xPaddingMethod":"tokenish", "xPaddingPlacement":"queryInHeader" }
 JEOF
+  echo
+  warn "Главное — uplinkHTTPMethod = OPTIONS. Ссылка его уже несёт; если правишь руками — не убирай."
 }
 
 cdn_check() {
   check_root
   [ -f "$CDN_ENV" ] || { err "CDN ещё не настроен. Запусти: vpn cdn"; return 1; }
   . "$CDN_ENV"
-  local ip resolved url
+  local ip resolved code url
   ip=$(server_ip)
   echo
   cecho "${GREEN}=== Проверка CDN (${CDN_PROVIDER:-?}) ===${NC}"
-  echo "  Домен:   ${CDN_HOST}"
-  echo "  Origin:  ${ip}:${CDN_ORIGIN_PORT}"
-  echo "  Клиент:  :${CDN_CLIENT_PORT}/${CDN_SECURITY}"
-  printf '  Сервисы: xray=%s bridge=%s\n' \
-    "$(systemctl is-active xray-vpn-cdn-xray 2>/dev/null || echo нет)" \
-    "$(systemctl is-active xray-vpn-cdn-bridge 2>/dev/null || echo нет)"
+  echo "  CDN-домен: ${CDN_HOST}"
+  echo "  Origin:    ${ip}:80 (HTTP)"
+  echo "  Путь:      ${CDN_XHTTP_PATH}"
+  printf '  Сервисы:   nginx=%s  xray=%s\n' \
+    "$(systemctl is-active nginx 2>/dev/null || echo нет)" \
+    "$(systemctl is-active xray-vpn-cdn-xray 2>/dev/null || echo нет)"
 
-  if curl -s --max-time 5 "http://127.0.0.1:${CDN_ORIGIN_PORT}/" 2>/dev/null | grep -qi welcome; then
-    ok "origin локально отвечает"
+  code=$(curl -s -o /dev/null -w '%{http_code}' -X OPTIONS --data-binary 'test' "http://127.0.0.1/cdn-check" 2>/dev/null || echo 000)
+  if [ "$code" = "204" ]; then
+    ok "origin локально: OPTIONS /cdn-check -> 204"
   else
-    err "origin локально не отвечает (systemctl status xray-vpn-cdn-bridge)"
+    err "origin локально вернул ${code} (проверь: systemctl status nginx xray-vpn-cdn-xray)"
   fi
 
   resolved=$(getent hosts "$CDN_HOST" 2>/dev/null | awk '{print $1}' | head -1)
@@ -1455,11 +1412,12 @@ cdn_check() {
     warn "домен указывает ПРЯМО на VPS — это не через CDN. Домен должен вести на edge CDN."
   fi
 
-  if [ "${CDN_SECURITY:-none}" = "tls" ]; then url="https://${CDN_HOST}/"; else url="http://${CDN_HOST}/"; fi
-  if curl -sk --max-time 10 "$url" 2>/dev/null | grep -qi welcome; then
-    ok "через домен (${url}) origin доступен — цепочка CDN->origin работает"
+  url="https://${CDN_HOST}/cdn-check?nocache=$(date +%s)"
+  code=$(curl -sk -o /dev/null -w '%{http_code}' -X OPTIONS --data-binary 'test' "$url" 2>/dev/null || echo 000)
+  if [ "$code" = "204" ]; then
+    ok "через домен: OPTIONS -> 204 — цепочка CDN->origin работает"
   else
-    warn "через домен пока не отвечает — проверь CDN/DNS/сертификат (возможно ещё распространяется)"
+    warn "через домен OPTIONS вернул ${code} (ждём 204). Проверь: протокол источника=HTTP, метод OPTIONS разрешён, кэш off, CNAME и сертификат."
   fi
 }
 
@@ -1492,14 +1450,15 @@ cdn_remove() {
 
 cdn_uninstall() {
   log "Удаляю CDN-модуль..."
-  systemctl disable --now xray-vpn-cdn-bridge.service xray-vpn-cdn-xray.service >>"$INSTALL_LOG" 2>&1 || true
-  rm -f /etc/systemd/system/xray-vpn-cdn-bridge.service /etc/systemd/system/xray-vpn-cdn-xray.service
+  systemctl disable --now xray-vpn-cdn-xray.service xray-vpn-cdn-bridge.service >>"$INSTALL_LOG" 2>&1 || true
+  rm -f /etc/systemd/system/xray-vpn-cdn-xray.service /etc/systemd/system/xray-vpn-cdn-bridge.service
   systemctl daemon-reload 2>/dev/null || true
   systemctl reset-failed 2>/dev/null || true
-  if [ -f "$CDN_ENV" ]; then
-    . "$CDN_ENV"
-    ufw delete allow "${CDN_ORIGIN_PORT:-80}/tcp" >>"$INSTALL_LOG" 2>&1 || true
+  rm -f /etc/nginx/sites-enabled/xray-vpn-cdn.conf "$CDN_NGINX_SITE" "$CDN_NGINX_MAP"
+  if command -v nginx >/dev/null 2>&1; then
+    nginx -t >/dev/null 2>&1 && systemctl reload nginx >/dev/null 2>&1 || true
   fi
+  ufw delete allow 80/tcp >>"$INSTALL_LOG" 2>&1 || true
   rm -rf "$CDN_DIR"
   rm -f "$CDN_ENV"
 }
