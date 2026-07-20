@@ -35,7 +35,7 @@ export LANG="${LANG:-C.UTF-8}"
 export LC_ALL="${LC_ALL:-C.UTF-8}"
 
 # ==================== КОНСТАНТЫ ====================
-SCRIPT_VERSION="2.8"
+SCRIPT_VERSION="2.9"
 SCRIPT_URL="https://raw.githubusercontent.com/TYNMANSUK/xray-vpn-setup/main/install.sh"
 REPO_URL="https://github.com/TYNMANSUK/xray-vpn-setup"
 XUI_INSTALLER_URL="https://raw.githubusercontent.com/MHSanaei/3x-ui/master/install.sh"
@@ -1160,12 +1160,13 @@ cdn_gen_path() {
 }
 
 cdn_link() {
-  # клиент идёт на CDN (externalProxy): host:443, tls, chrome; простой XHTTP
+  # клиент идёт на CDN (externalProxy): host:443, tls, chrome; XHTTP с GET-аплинком
   local uuid="$1" host="$2" path="$3"
-  local epath
+  local epath extra_enc
   epath=$(printf '%s' "$path" | jq -Rr @uri 2>/dev/null || printf '%s' "$path")
-  printf 'vless://%s@%s:443?encryption=none&type=xhttp&security=tls&sni=%s&fp=chrome&alpn=h2%%2Chttp%%2F1.1&path=%s&mode=packet-up#CDN-XHTTP' \
-    "$uuid" "$host" "$host" "$epath"
+  extra_enc=$(printf '%s' '{"uplinkHTTPMethod":"GET","uplinkDataPlacement":"body"}' | jq -Rr @uri 2>/dev/null || true)
+  printf 'vless://%s@%s:443?encryption=none&type=xhttp&security=tls&sni=%s&fp=chrome&alpn=h2%%2Chttp%%2F1.1&path=%s&mode=packet-up&extra=%s#CDN-XHTTP' \
+    "$uuid" "$host" "$host" "$epath" "$extra_enc"
 }
 
 # создать в 3x-ui инбаунд VLESS + XHTTP(security none) + externalProxy на CDN
@@ -1180,11 +1181,12 @@ create_cdn_inbound() {
     clients:[{ id:$uuid, email:"cdn-default", flow:"", limitIp:0, totalGB:0, expiryTime:0, enable:true, tgId:0, subId:$sub, comment:"", reset:0 }],
     decryption:"none"
   }')
-  # Простой XHTTP (как генерит клиент): path + packet-up, без кастомного extra.
-  # Клиент и сервер должны совпадать — иначе туннель не поднимается.
+  # XHTTP с GET-аплинком: Yandex CDN пропускает только GET/HEAD/OPTIONS (POST режет).
+  # uplinkHTTPMethod=GET обязателен И на сервере, И в клиенте — иначе трафик не идёт.
   stream=$(jq -n --arg path "$path" --arg host "$cdn_host" '{
     network:"xhttp", security:"none",
-    xhttpSettings:{ path:$path, host:"", mode:"packet-up" },
+    xhttpSettings:{ path:$path, host:"", mode:"packet-up",
+      extra:{ uplinkHTTPMethod:"GET", uplinkDataPlacement:"body" } },
     externalProxy:[{ forceTls:"tls", dest:$host, port:443, remark:"CDN", sni:$host, fingerprint:"chrome", alpn:["h2","http/1.1"] }]
   }')
   sniffing='{"enabled":true,"destOverride":["http","tls","quic"],"metadataOnly":false,"routeOnly":false}'
@@ -1388,6 +1390,7 @@ cdn_setup() {
   path="${CDN_PATH:-$(cdn_gen_path)}"
 
   cdn_delete_inbound   # убрать прежний XVPN-CDN, чтобы не дублировать
+  sleep 3              # дать x-ui перегенерить конфиг и освободить порт (иначе create упадёт «port in use»)
   log "Создаю инбаунд XVPN-CDN: порт ${port}, путь ${path}, externalProxy -> ${host}:443 ..."
   if ! create_cdn_inbound "$uuid" "$port" "$path" "$host"; then
     err "Не удалось создать инбаунд. Лог: grep create_cdn_inbound ${INSTALL_LOG}"
